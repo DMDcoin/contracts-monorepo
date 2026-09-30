@@ -43,6 +43,10 @@ contract StakingHbbftMock is StakingHbbft {
         stakeAmountTotal[_poolStakingAddress] = _amount;
     }
 
+    function setTotalStakedAmount(uint256 _amount) public {
+        totalStakedAmount = _amount;
+    }
+
     function setStakingEpoch(uint256 _stakingEpoch) public {
         stakingEpoch = _stakingEpoch;
     }

@@ -174,6 +174,52 @@ describe("StakingHbbft", () => {
         assert.equal(initialValidators.length, 3);
     });
 
+    async function sumPoolTotalStake(stakingHbbft: StakingHbbftMock, pool: Address): Promise<bigint> {
+        let result = await stakingHbbft.read.stakeAmount([pool, pool]);
+
+        const delegators = [
+            ...(await stakingHbbft.read.poolDelegators([pool])),
+            ...(await stakingHbbft.read.poolDelegatorsInactive([pool])),
+        ];
+
+        for (const delegator of delegators) {
+            result += await stakingHbbft.read.stakeAmount([pool, delegator]);
+        }
+
+        return result;
+    }
+
+    async function callRestake(
+        stakingHbbft: StakingHbbftMock,
+        blockRewardHbbft: BlockRewardHbbftMock,
+        pool: Address,
+        poolReward: bigint,
+        validatorMinRewardPercent: bigint = 30n,
+    ) {
+        const caller = await impersonateAcc(blockRewardHbbft.address, poolReward + parseEther("1"));
+
+        const txHash = await stakingHbbft.write.restake(
+            [pool, validatorMinRewardPercent],
+            { account: caller, value: poolReward },
+        );
+
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+        const events = parseEventLogs({
+            abi: stakingHbbft.abi,
+            eventName: "RestakeReward",
+            logs: receipt.logs,
+        });
+
+        await helpers.stopImpersonatingAccount(caller);
+
+        const eventArgs = events[0].args;
+
+        return {
+            validatorReward: eventArgs.validatorReward,
+            delegatorsReward: eventArgs.delegatorsReward,
+        }
+    }
+
     describe("addPool", async function () {
         it("should create a new pool and emit event", async function () {
             const { stakingHbbft } = await helpers.loadFixture(deployContractsFixture);
@@ -2880,6 +2926,308 @@ describe("StakingHbbft", () => {
                 );
             });
         });
+
+        describe("rewards division remainder", async function () {
+            const delegatorStakes = [parseEther("100") + 1n, parseEther("200") + 3n, parseEther("300") + 7n];
+            const poolReward = parseEther("10") + 3n;
+            const validatorMinRewardPercent = 30n;
+
+            async function deployPoolWithDelegatorsFixture() {
+                const fixture = await deployContractsFixture();
+
+                const {
+                    stakingHbbft,
+                    blockRewardHbbft,
+                    candidateMinStake,
+                } = fixture;
+
+                const validator = initialValidators[0];
+                const pool = validator.stakingAddress();
+                const delegatorAccounts = accounts.slice(10, 10 + delegatorStakes.length);
+
+                await stakingHbbft.write.stake([pool], { account: validator.staking, value: candidateMinStake });
+
+                for (let i = 0; i < delegatorAccounts.length; ++i) {
+                    await stakingHbbft.write.stake(
+                        [pool],
+                        {
+                            account: delegatorAccounts[i].account,
+                            value: delegatorStakes[i],
+                        },
+                    );
+                }
+
+                await callReward(blockRewardHbbft, false);
+                await callReward(blockRewardHbbft, true);
+
+                return {
+                    ...fixture,
+                    validator,
+                    pool,
+                    delegatorAccounts,
+                    delegators: delegatorAccounts.map((x) => getAddress(x.account.address)),
+                };
+            }
+
+            async function getExpectedRewardShares(
+                stakingHbbft: StakingHbbftMock,
+                pool: Address,
+                nodeOperatorSharePercent: bigint = 0n,
+            ) {
+                const epoch = await stakingHbbft.read.stakingEpoch();
+                const totalStake = await stakingHbbft.read.snapshotPoolTotalStakeAmount([epoch, pool]);
+                const validatorStake = await stakingHbbft.read.snapshotPoolValidatorStakeAmount([epoch, pool]);
+
+                const validatorFixedReward = (poolReward * validatorMinRewardPercent) / 100n;
+                const delegatorsShare = poolReward - validatorFixedReward;
+                const nodeOperatorShare = (poolReward * nodeOperatorSharePercent) / 10000n;
+
+                const delegatorRewards = delegatorStakes.map((stake) => (delegatorsShare * stake) / totalStake);
+                const delegatorRewardsSum = delegatorRewards.reduce((sum, x) => sum + x, 0n);
+
+                const validatorShareWithoutRemainder =
+                    validatorFixedReward - nodeOperatorShare + (delegatorsShare * validatorStake) / totalStake;
+
+                return {
+                    delegatorRewards,
+                    nodeOperatorShare,
+                    validatorShareWithoutRemainder,
+                    validatorShare: poolReward - nodeOperatorShare - delegatorRewardsSum,
+                };
+            }
+
+            it("should credit the remainder to the validator", async function () {
+                const {
+                    stakingHbbft,
+                    blockRewardHbbft,
+                    pool,
+                    delegators,
+                } = await helpers.loadFixture(deployPoolWithDelegatorsFixture);
+
+                const expected = await getExpectedRewardShares(stakingHbbft, pool);
+                assert.ok(expected.validatorShare > expected.validatorShareWithoutRemainder);
+
+                const validatorStakeBefore = await stakingHbbft.read.stakeAmount([pool, pool]);
+                const validatorEpochStakeBefore = await stakingHbbft.read.stakeAmountByCurrentEpoch([pool, pool]);
+                const totalStakeBefore = await stakingHbbft.read.stakeAmountTotal([pool]);
+
+                const restakeResult = await callRestake(
+                    stakingHbbft,
+                    blockRewardHbbft,
+                    pool,
+                    poolReward,
+                    validatorMinRewardPercent,
+                );
+
+                assert.equal(
+                    await stakingHbbft.read.stakeAmount([pool, pool]),
+                    validatorStakeBefore + expected.validatorShare,
+                );
+                assert.equal(
+                    await stakingHbbft.read.stakeAmountByCurrentEpoch([pool, pool]),
+                    validatorEpochStakeBefore + expected.validatorShare,
+                );
+
+                for (let i = 0; i < delegators.length; ++i) {
+                    assert.equal(
+                        await stakingHbbft.read.stakeAmount([pool, delegators[i]]),
+                        delegatorStakes[i] + expected.delegatorRewards[i],
+                    );
+                }
+
+                assert.equal(restakeResult.validatorReward, expected.validatorShare);
+                assert.equal(restakeResult.delegatorsReward, poolReward - expected.validatorShare);
+
+                assert.equal(await stakingHbbft.read.stakeAmountTotal([pool]), totalStakeBefore + poolReward);
+                assert.equal(await sumPoolTotalStake(stakingHbbft, pool), totalStakeBefore + poolReward);
+            });
+
+            it("should credit the whole reward to the validator without delegators", async function () {
+                const {
+                    stakingHbbft,
+                    blockRewardHbbft,
+                    candidateMinStake,
+                } = await helpers.loadFixture(deployContractsFixture);
+
+                const validator = initialValidators[0];
+                const pool = validator.stakingAddress();
+
+                await stakingHbbft.write.stake(
+                    [pool],
+                    {
+                        account: validator.staking,
+                        value: candidateMinStake,
+                    },
+                );
+
+                await callReward(blockRewardHbbft, false);
+                await callReward(blockRewardHbbft, true);
+
+                const restakeResult = await callRestake(
+                    stakingHbbft,
+                    blockRewardHbbft,
+                    pool,
+                    poolReward,
+                    validatorMinRewardPercent,
+                );
+
+                assert.equal(restakeResult.validatorReward, poolReward);
+                assert.equal(restakeResult.delegatorsReward, 0n);
+
+                assert.equal(await stakingHbbft.read.stakeAmount([pool, pool]), candidateMinStake + poolReward);
+                assert.equal(await stakingHbbft.read.stakeAmountTotal([pool]), candidateMinStake + poolReward);
+            });
+
+            it("should not credit the remainder to the node operator", async function () {
+                const {
+                    stakingHbbft,
+                    blockRewardHbbft,
+                    pool,
+                    delegators,
+                } = await helpers.loadFixture(deployPoolWithDelegatorsFixture);
+
+                const nodeOperator = createRandomWallet().address;
+                const nodeOperatorSharePercent = 1500n;
+
+                await stakingHbbft.write.setNodeOperatorMock(
+                    [pool, nodeOperator, nodeOperatorSharePercent],
+                    { account: owner.account },
+                );
+
+                const expected = await getExpectedRewardShares(stakingHbbft, pool, nodeOperatorSharePercent);
+                assert.ok(expected.validatorShare > expected.validatorShareWithoutRemainder);
+
+                const validatorStakeBefore = await stakingHbbft.read.stakeAmount([pool, pool]);
+                const totalStakeBefore = await stakingHbbft.read.stakeAmountTotal([pool]);
+
+                const restakeResult = await callRestake(
+                    stakingHbbft,
+                    blockRewardHbbft,
+                    pool,
+                    poolReward,
+                    validatorMinRewardPercent,
+                );
+
+                assert.equal(await stakingHbbft.read.stakeAmount([pool, nodeOperator]), expected.nodeOperatorShare);
+                assert.equal(
+                    await stakingHbbft.read.stakeAmount([pool, pool]),
+                    validatorStakeBefore + expected.validatorShare,
+                );
+
+                for (let i = 0; i < delegators.length; ++i) {
+                    assert.equal(
+                        await stakingHbbft.read.stakeAmount([pool, delegators[i]]),
+                        delegatorStakes[i] + expected.delegatorRewards[i],
+                    );
+                }
+
+                assert.equal(restakeResult.validatorReward, expected.validatorShare);
+                assert.equal(await sumPoolTotalStake(stakingHbbft, pool), totalStakeBefore + poolReward);
+            });
+
+            it("should account rewards of inactive delegators", async function () {
+                const {
+                    stakingHbbft,
+                    blockRewardHbbft,
+                    pool,
+                    delegators,
+                    delegatorAccounts,
+                } = await helpers.loadFixture(deployPoolWithDelegatorsFixture);
+
+                await stakingHbbft.write.orderWithdraw(
+                    [pool, delegatorStakes[1]],
+                    { account: delegatorAccounts[1].account },
+                );
+
+                assert.deepEqual(await stakingHbbft.read.poolDelegatorsInactive([pool]), [delegators[1]]);
+                assert.equal(await stakingHbbft.read.stakeAmount([pool, delegators[1]]), 0n);
+
+                const expected = await getExpectedRewardShares(stakingHbbft, pool);
+
+                const validatorStakeBefore = await stakingHbbft.read.stakeAmount([pool, pool]);
+                const totalStakeBefore = await stakingHbbft.read.stakeAmountTotal([pool]);
+
+                const restakeResult = await callRestake(
+                    stakingHbbft,
+                    blockRewardHbbft,
+                    pool,
+                    poolReward,
+                    validatorMinRewardPercent,
+                );
+
+                assert.equal(await stakingHbbft.read.stakeAmount([pool, delegators[1]]), expected.delegatorRewards[1]);
+                assert.equal(
+                    await stakingHbbft.read.stakeAmount([pool, pool]),
+                    validatorStakeBefore + expected.validatorShare,
+                );
+
+                assert.equal(restakeResult.validatorReward, expected.validatorShare);
+                assert.equal(await sumPoolTotalStake(stakingHbbft, pool), totalStakeBefore + poolReward);
+            });
+
+            it("should keep pool stakes consistent over multiple staking epochs", async function () {
+                const {
+                    stakingHbbft,
+                    blockRewardHbbft,
+                    validatorSetHbbft,
+                    candidateMinStake,
+                } = await helpers.loadFixture(deployContractsFixture);
+
+                const delegatorAccounts = accounts.slice(10, 10 + delegatorStakes.length);
+
+                for (const validator of initialValidators) {
+                    await stakingHbbft.write.stake(
+                        [validator.stakingAddress()],
+                        {
+                            account: validator.staking,
+                            value: candidateMinStake,
+                        },
+                    );
+
+                    const latestBlock = await publicClient.getBlock();
+                    await validatorSetHbbft.write.announceAvailability(
+                        [latestBlock.number, latestBlock.hash],
+                        { account: validator.mining },
+                    );
+
+                    for (let i = 0; i < delegatorAccounts.length; ++i) {
+                        await stakingHbbft.write.stake(
+                            [validator.stakingAddress()],
+                            {
+                                account: delegatorAccounts[i].account,
+                                value: delegatorStakes[i],
+                            },
+                        );
+                    }
+                }
+
+                await callReward(blockRewardHbbft, true);
+
+                for (let epoch = 0; epoch < 5; ++epoch) {
+                    const totalStakesBefore = new Map<Address, bigint>();
+                    for (const validator of initialValidators) {
+                        const pool = validator.stakingAddress();
+                        totalStakesBefore.set(pool, await stakingHbbft.read.stakeAmountTotal([pool]));
+                    }
+
+                    await blockRewardHbbft.write.addToDeltaPot({ value: parseEther("10") + 7n });
+
+                    const fixedEpochEndTime = await stakingHbbft.read.stakingFixedEpochEndTime();
+                    await helpers.time.increaseTo(fixedEpochEndTime + 1n);
+                    await helpers.mine(1);
+
+                    await callReward(blockRewardHbbft, true);
+
+                    for (const validator of initialValidators) {
+                        const pool = validator.stakingAddress();
+                        const totalStake = await stakingHbbft.read.stakeAmountTotal([pool]);
+
+                        assert.ok(totalStake > totalStakesBefore.get(pool)!);
+                        assert.equal(await sumPoolTotalStake(stakingHbbft, pool), totalStake);
+                    }
+                }
+            });
+        });
     });
 
     describe("setDelegatorMinStake", async function () {
@@ -3076,7 +3424,6 @@ describe("StakingHbbft", () => {
             stakingHbbft: StakingHbbftMock,
             poolAddress: Address,
             delegators: Address[],
-            toleranceEther: string = "0",
         ) {
             const validatorStake = await stakingHbbft.read.stakeAmount([poolAddress, poolAddress]);
             const totalStake = await stakingHbbft.read.stakeAmountTotal([poolAddress]);
@@ -3087,14 +3434,7 @@ describe("StakingHbbft", () => {
                 sumOfStakes += delegatorStake;
             }
 
-            assert.ok(sumOfStakes <= totalStake);
-
-            const diff = totalStake - sumOfStakes;
-            const tolerance = parseEther(toleranceEther) + 100n;
-
-            assert.ok(diff <= tolerance, `expected stake diff ${diff} to be within tolerance ${tolerance}`);
-
-            return { sumOfStakes, totalStake, diff };
+            assert.equal(sumOfStakes, totalStake);
         }
 
         it("should handle multiple withdraw orders and cancels", async function () {
@@ -3317,7 +3657,7 @@ describe("StakingHbbft", () => {
             });
             await helpers.stopImpersonatingAccount(caller);
 
-            await verifyStakeConsistency(stakingHbbft, validator.stakingAddress(), delegators, "10");
+            await verifyStakeConsistency(stakingHbbft, validator.stakingAddress(), delegators);
         });
 
         it("should handle random orderWitdhraw/cancel requests", async function () {
@@ -3380,12 +3720,7 @@ describe("StakingHbbft", () => {
                 });
                 await helpers.stopImpersonatingAccount(caller);
 
-                await verifyStakeConsistency(
-                    stakingHbbft,
-                    validator.stakingAddress(),
-                    delegatorAddresses,
-                    String(epoch + 2),
-                );
+                await verifyStakeConsistency(stakingHbbft, validator.stakingAddress(), delegatorAddresses);
             }
 
             const finalValidator = await stakingHbbft.read.stakeAmount([
@@ -3394,7 +3729,7 @@ describe("StakingHbbft", () => {
             ]);
             const finalTotal = await stakingHbbft.read.stakeAmountTotal([validator.stakingAddress()]);
 
-            await verifyStakeConsistency(stakingHbbft, validator.stakingAddress(), delegatorAddresses, "15");
+            await verifyStakeConsistency(stakingHbbft, validator.stakingAddress(), delegatorAddresses);
 
             assert.ok(finalValidator <= finalTotal);
         });
@@ -3527,11 +3862,7 @@ describe("StakingHbbft", () => {
                 });
                 await helpers.stopImpersonatingAccount(caller);
 
-                const result = await verifyStakeConsistency(stakingHbbft, validator.stakingAddress(), [
-                    delegatorAddr,
-                ]);
-
-                assert.ok(result.diff <= 100n);
+                await verifyStakeConsistency(stakingHbbft, validator.stakingAddress(), [delegatorAddr]);
             }
 
             const finalValidator = await stakingHbbft.read.stakeAmount([
@@ -3541,6 +3872,191 @@ describe("StakingHbbft", () => {
             const finalTotal = await stakingHbbft.read.stakeAmountTotal([validator.stakingAddress()]);
 
             assert.ok(finalValidator <= finalTotal);
+        });
+    });
+
+    describe("initializeV4", async function () {
+        const delegatorStake = parseEther("150");
+
+        async function addDustTokens(stakingHbbft: StakingHbbftMock, pool: Address, dust: bigint) {
+            const totalStake = await stakingHbbft.read.stakeAmountTotal([pool]);
+            const totalStakedAmount = await stakingHbbft.read.totalStakedAmount();
+
+            await stakingHbbft.write.setStakeAmountTotal([pool, totalStake + dust]);
+            await stakingHbbft.write.setTotalStakedAmount([totalStakedAmount + dust]);
+        }
+
+        it("should add dust to the self stake of active pool", async function () {
+            const {
+                stakingHbbft,
+                candidateMinStake,
+            } = await helpers.loadFixture(deployContractsFixture);
+
+            const validator = initialValidators[0];
+            const pool = validator.stakingAddress();
+            const delegators = accounts.slice(10, 12);
+
+            await stakingHbbft.write.stake([pool], { account: validator.staking, value: candidateMinStake });
+            for (const delegator of delegators) {
+                await stakingHbbft.write.stake([pool], { account: delegator.account, value: delegatorStake });
+            }
+
+            const dust = 12345n;
+            await addDustTokens(stakingHbbft, pool, dust);
+
+            const totalStake = await stakingHbbft.read.stakeAmountTotal([pool]);
+            const totalStakedAmount = await stakingHbbft.read.totalStakedAmount();
+            assert.equal(await sumPoolTotalStake(stakingHbbft, pool), totalStake - dust);
+
+            await stakingHbbft.write.initializeV4();
+
+            assert.equal(await stakingHbbft.read.stakeAmount([pool, pool]), candidateMinStake + dust);
+            for (const delegator of delegators) {
+                assert.equal(
+                    await stakingHbbft.read.stakeAmount([pool, getAddress(delegator.account.address)]),
+                    delegatorStake,
+                );
+            }
+
+            assert.equal(await stakingHbbft.read.stakeAmountTotal([pool]), totalStake);
+            assert.equal(await stakingHbbft.read.totalStakedAmount(), totalStakedAmount);
+            assert.equal(await sumPoolTotalStake(stakingHbbft, pool), totalStake);
+        });
+
+        it("should not change pools without dust", async function () {
+            const { stakingHbbft, candidateMinStake } = await helpers.loadFixture(deployContractsFixture);
+
+            const delegator = accounts[10];
+
+            for (const validator of initialValidators) {
+                await stakingHbbft.write.stake([validator.stakingAddress()], {
+                    account: validator.staking,
+                    value: candidateMinStake,
+                });
+
+                await stakingHbbft.write.stake([validator.stakingAddress()], {
+                    account: delegator.account,
+                    value: delegatorStake,
+                });
+            }
+
+            const dust = 12345n;
+            const poolWithDust = initialValidators[0].stakingAddress();
+            await addDustTokens(stakingHbbft, poolWithDust, dust);
+
+            await stakingHbbft.write.initializeV4();
+
+            for (const validator of initialValidators) {
+                const pool = validator.stakingAddress();
+                const expectedSelfStake = pool === poolWithDust ? candidateMinStake + dust : candidateMinStake;
+
+                assert.equal(await stakingHbbft.read.stakeAmount([pool, pool]), expectedSelfStake);
+                assert.equal(
+                    await stakingHbbft.read.stakeAmount([pool, getAddress(delegator.account.address)]),
+                    delegatorStake,
+                );
+                assert.equal(await sumPoolTotalStake(stakingHbbft, pool), await stakingHbbft.read.stakeAmountTotal([pool]));
+            }
+        });
+
+        it("should take stakes of inactive delegators into account", async function () {
+            const {
+                stakingHbbft,
+                blockRewardHbbft,
+                candidateMinStake,
+            } = await helpers.loadFixture(deployContractsFixture);
+
+            const validator = initialValidators[0];
+            const pool = validator.stakingAddress();
+            const delegator = accounts[10];
+            const delegatorAddress = getAddress(delegator.account.address);
+
+            await stakingHbbft.write.stake([pool], { account: validator.staking, value: candidateMinStake });
+            await stakingHbbft.write.stake([pool], { account: delegator.account, value: delegatorStake });
+
+            await callReward(blockRewardHbbft, false);
+            await callReward(blockRewardHbbft, true);
+
+            await stakingHbbft.write.orderWithdraw([pool, delegatorStake], { account: delegator.account });
+            await callRestake(stakingHbbft, blockRewardHbbft, pool, parseEther("10"));
+
+            const inactiveDelegatorStake = await stakingHbbft.read.stakeAmount([pool, delegatorAddress]);
+            assert.ok(inactiveDelegatorStake > 0n);
+            assert.deepEqual(await stakingHbbft.read.poolDelegators([pool]), []);
+            assert.deepEqual(await stakingHbbft.read.poolDelegatorsInactive([pool]), [delegatorAddress]);
+
+            const dust = 333n;
+            await addDustTokens(stakingHbbft, pool, dust);
+
+            const validatorStake = await stakingHbbft.read.stakeAmount([pool, pool]);
+
+            await stakingHbbft.write.initializeV4();
+
+            assert.equal(await stakingHbbft.read.stakeAmount([pool, pool]), validatorStake + dust);
+            assert.equal(await stakingHbbft.read.stakeAmount([pool, delegatorAddress]), inactiveDelegatorStake);
+            assert.equal(await sumPoolTotalStake(stakingHbbft, pool), await stakingHbbft.read.stakeAmountTotal([pool]));
+        });
+
+        it("should add dust to the self stake of inactive pool", async function () {
+            const { stakingHbbft } = await helpers.loadFixture(deployContractsFixture);
+
+            const pool = candidate.stakingAddress();
+            const dust = 17n;
+
+            await stakingHbbft.write.addPoolInactiveMock([pool]);
+            await addDustTokens(stakingHbbft, pool, dust);
+
+            assert.ok((await stakingHbbft.read.getPoolsInactive()).includes(pool));
+            assert.equal(await stakingHbbft.read.stakeAmount([pool, pool]), 0n);
+
+            await stakingHbbft.write.initializeV4();
+
+            assert.equal(await stakingHbbft.read.stakeAmount([pool, pool]), dust);
+            assert.equal(await stakingHbbft.read.stakeAmountTotal([pool]), dust);
+        });
+
+        it("should allow validator to order withdrawal of the whole pool stake", async function () {
+            const {
+                stakingHbbft,
+                blockRewardHbbft,
+                candidateMinStake,
+            } = await helpers.loadFixture(deployContractsFixture);
+
+            const validator = initialValidators[0];
+            const pool = validator.stakingAddress();
+
+            await stakingHbbft.write.stake([pool], { account: validator.staking, value: candidateMinStake });
+
+            await callReward(blockRewardHbbft, false);
+            await callReward(blockRewardHbbft, true);
+
+            const dust = 12345n;
+            await addDustTokens(stakingHbbft, pool, dust);
+
+            assert.equal(await stakingHbbft.read.maxWithdrawOrderAllowed([pool, pool]), candidateMinStake);
+
+            await stakingHbbft.write.initializeV4();
+
+            const totalStake = await stakingHbbft.read.stakeAmountTotal([pool]);
+            assert.equal(totalStake, candidateMinStake + dust);
+            assert.equal(await stakingHbbft.read.maxWithdrawOrderAllowed([pool, pool]), totalStake);
+
+            await stakingHbbft.write.orderWithdraw([pool, totalStake], { account: validator.staking });
+
+            assert.equal(await stakingHbbft.read.stakeAmountTotal([pool]), 0n);
+            assert.equal(await stakingHbbft.read.orderedWithdrawAmount([pool, pool]), totalStake);
+        });
+
+        it("should not allow calling initializer twice", async function () {
+            const { stakingHbbft } = await helpers.loadFixture(deployContractsFixture);
+
+            await stakingHbbft.write.initializeV4();
+
+            await hhViem.assertions.revertWithCustomError(
+                stakingHbbft.write.initializeV4(),
+                stakingHbbft,
+                "InvalidInitialization",
+            );
         });
     });
 
