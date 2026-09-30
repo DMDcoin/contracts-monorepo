@@ -432,32 +432,40 @@ contract StakingHbbft is
         stakingTransitionTimeframeLength = stakingParams._stakingTransitionTimeframeLength;
     }
 
-    // Epoch 79 incident fix initializer
-    function initializeV3() external reinitializer(3) {
-        uint256 _epoch = stakingEpoch;
+    /// @dev Fixes an issue that caused incorrect accounting of the token division
+    /// remainder during reward distribution.
+    ///
+    /// Reference: https://github.com/DMDcoin/contracts-monorepo/issues/317
+    function initializeV4() external reinitializer(4) {
         address[] memory allPools = _pools.values();
-
         for (uint256 i = 0; i < allPools.length; ++i) {
-            address _pool = allPools[i];
-
-            bool validSnapshot = snapshotPoolTotalStakeAmount[_epoch][_pool]
-                >= snapshotPoolValidatorStakeAmount[_epoch][_pool];
-
-            bool validStake = stakeAmountTotal[_pool] >= stakeAmount[_pool][_pool];
-
-            if (validStake && validSnapshot) {
-                continue;
-            }
-
-            if (!validSnapshot) {
-                snapshotPoolValidatorStakeAmount[_epoch][_pool] =
-                    snapshotPoolTotalStakeAmount[_epoch][_pool];
-            }
-
-            if (!validStake) {
-                stakeAmount[_pool][_pool] = stakeAmountTotal[_pool];
-            }
+            _accountDustRewards(allPools[i]);
         }
+
+        address[] memory inactivePools = _poolsInactive.values();
+        for (uint256 i = 0; i < inactivePools.length; ++i) {
+            _accountDustRewards(inactivePools[i]);
+        }
+    }
+
+    function _accountDustRewards(address pool) private {
+        address[] memory delegators = _poolDelegators[pool].values();
+        address[] memory inactiveDelegators = _poolDelegatorsInactive[pool].values();
+
+        uint256 selfStake = stakeAmount[pool][pool];
+        uint256 delegatedStake = 0;
+
+        for (uint256 i = 0; i < delegators.length; ++i) {
+            delegatedStake += stakeAmount[pool][delegators[i]];
+        }
+
+        for (uint256 i = 0; i < inactiveDelegators.length; ++i) {
+            delegatedStake += stakeAmount[pool][inactiveDelegators[i]];
+        }
+
+        uint256 diff = stakeAmountTotal[pool] - selfStake - delegatedStake;
+
+        stakeAmount[pool][pool] += diff;
     }
 
     /// @dev Sets the minimum stake required for delegators.
@@ -713,9 +721,12 @@ contract StakingHbbft is
         PoolRewardShares memory shares =
             _splitPoolReward(_poolStakingAddress, poolReward, _validatorMinRewardPercent);
 
+        uint256 distributionRemainder =
+            poolReward - shares.validatorShare - shares.nodeOperatorShare;
+
         address[] memory delegators = poolDelegators(_poolStakingAddress);
         for (uint256 i = 0; i < delegators.length; ++i) {
-            _distributeDelegatorReward(
+            distributionRemainder -= _distributeDelegatorReward(
                 _poolStakingAddress, delegators[i], shares.delegatorsShare, totalStake
             );
         }
@@ -723,7 +734,7 @@ contract StakingHbbft is
         // Include delegators who withdrew (ordered withdrawals of) their stake during the current staking epoch
         address[] memory inactiveDelegators = poolDelegatorsInactive(_poolStakingAddress);
         for (uint256 i = 0; i < inactiveDelegators.length; ++i) {
-            _distributeDelegatorReward(
+            distributionRemainder -= _distributeDelegatorReward(
                 _poolStakingAddress, inactiveDelegators[i], shares.delegatorsShare, totalStake
             );
         }
@@ -732,10 +743,14 @@ contract StakingHbbft is
             _rewardNodeOperator(_poolStakingAddress, shares.nodeOperatorShare);
         }
 
-        stakeAmount[_poolStakingAddress][_poolStakingAddress] += shares.validatorShare;
-        _stakeAmountByEpoch[
-            _poolStakingAddress
-        ][_poolStakingAddress][stakingEpoch] += shares.validatorShare;
+        uint256 validatorShare = shares.validatorShare + distributionRemainder;
+
+        // forgefmt: disable-start
+
+        stakeAmount[_poolStakingAddress][_poolStakingAddress] += validatorShare;
+        _stakeAmountByEpoch[_poolStakingAddress][_poolStakingAddress][stakingEpoch]+= validatorShare;
+
+        // forgefmt: disable-end
 
         stakeAmountTotal[_poolStakingAddress] += poolReward;
         totalStakedAmount += poolReward;
@@ -745,8 +760,8 @@ contract StakingHbbft is
         emit RestakeReward(
             _poolStakingAddress,
             stakingEpoch,
-            shares.validatorShare,
-            poolReward - shares.validatorShare
+            validatorShare,
+            poolReward - validatorShare
         );
     }
 
