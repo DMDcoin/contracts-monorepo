@@ -25,6 +25,24 @@ export function createBaseConfig({
     HardhatUserConfig,
     "solidity" | "networks" | "paths"
 > {
+    // Besides "default" compilation profile, hardhat 3 generates its own
+    // "production" profile, which differes from one specified below.
+    // So this config needs to be explicitly used for both.
+    const compiler = {
+        version: "0.8.25",
+        settings: {
+            optimizer: {
+                enabled: true,
+                runs: 800,
+                details: {
+                    yul: true,
+                },
+            },
+            evmVersion: "london",
+            viaIR,
+        },
+    };
+
     return {
         solidity: {
             npmFilesToBuild: [
@@ -32,17 +50,9 @@ export function createBaseConfig({
                 "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol",
                 "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol",
             ],
-            version: "0.8.25",
-            settings: {
-                optimizer: {
-                    enabled: true,
-                    runs: 800,
-                    details: {
-                        yul: true,
-                    },
-                },
-                evmVersion: "london",
-                viaIR,
+            profiles: {
+                default: compiler,
+                production: { ...compiler, isolated: true },
             },
         },
         networks: {
