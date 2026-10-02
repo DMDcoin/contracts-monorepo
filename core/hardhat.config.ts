@@ -2,9 +2,11 @@ import { configVariable, defineConfig } from "hardhat/config";
 import hardhatToolboxViem from "@nomicfoundation/hardhat-toolbox-viem";
 import hardhatLedger from "@nomicfoundation/hardhat-ledger";
 import hardhatFoundry from "@nomicfoundation/hardhat-foundry";
+import hardhatVerify from "@nomicfoundation/hardhat-verify";
 import hardhatContractSizer from "@solidstate/hardhat-contract-sizer";
 
 import { createBaseConfig } from "../hardhat.base.js";
+import { getUpgradeCalldata } from "../scripts/tasks/index.js";
 
 const mnemonic = configVariable("MNEMONIC");
 
@@ -54,7 +56,9 @@ export default defineConfig({
         hardhatLedger,
         hardhatFoundry,
         hardhatContractSizer,
+        hardhatVerify,
     ],
+    tasks: getUpgradeCalldata,
     paths: {
         ...base.paths,
         tests: {
@@ -80,5 +84,22 @@ export default defineConfig({
         except: [
             /Mock/i,
         ],
+    },
+    chainDescriptors: {
+        17771: {
+            name: "DMD Diamond",
+            blockExplorers: {
+                blockscout: {
+                    name: "DMD Diamond Blockchain explorer",
+                    url: "https://explorer.bit.diamonds/",
+                    apiUrl: "https://explorer.bit.diamonds/api",
+                },
+            },
+        },
+    },
+    verify: {
+        blockscout: { enabled: true },
+        etherscan: { enabled: false },
+        sourcify: { enabled: false },
     },
 });
