@@ -2,7 +2,7 @@
     "name": "@dmdcoin/contracts-monorepo",
     "version": "4.0.0",
     "type": "module",
-    "packageManager": "pnpm@12.5.1",
+    "packageManager": "pnpm@12.10.1",
     "scripts": {
         "build": "pnpm run build:core && pnpm run build:dao && pnpm run build:views",
         "build:core": "pnpm --dir core run build",
@@ -27,7 +27,7 @@
     "devEngines": {
         "packageManager": {
             "name": "pnpm",
-            "version": "12.5.1",
+            "version": "12.10.1",
             "onFail": "error"
         }
     },

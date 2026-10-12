@@ -17,6 +17,11 @@ ignore:
       name: golang.org/x/text
       type: go-module
 
+  - vulnerability: GO-2026-6629
+    package:
+      name: golang.org/x/text
+      type: go-module
+
   # Hardhat EDR
   - vulnerability: GHSA-g98v-hv3f-hcfr
     package:

@@ -185,6 +185,10 @@ contract ValidatorSetHbbft is Initializable, OwnableUpgradeable, IValidatorSetHb
         maxValidators = 25;
     }
 
+    function initializeV2() external reinitializer(2) {
+        validatorInactivityThreshold = 10 * 365 days; // 10 years
+    }
+
     /// @dev Called by the system when a pending validator set is ready to be activated.
     /// After this function is called, the `getValidators` getter returns the new validator set.
     /// If this function finalizes, a new validator set is created by the `newValidatorSet` function.
