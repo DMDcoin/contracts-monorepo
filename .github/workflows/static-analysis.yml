@@ -153,6 +153,18 @@ jobs:
           SYFT_SOURCE_NAME: contracts-monorepo
           SYFT_SOURCE_VERSION: ${{ github.sha }}
 
+      - name: Display Grype report
+        if: always() && steps.grype.outputs.sarif != ''
+        env:
+          GRYPE_SARIF: ${{ steps.grype.outputs.sarif }}
+        run: |
+          echo "::group::Detected vulnerabilities"
+          jq -r '
+            .runs[].tool.driver.rules[]?
+            | (.help.text // .shortDescription.text // .id)
+          ' "$GRYPE_SARIF"
+          echo "::endgroup::"
+
       - name: Upload Grype report
         if: >
           always() &&
