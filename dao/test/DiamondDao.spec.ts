@@ -481,6 +481,32 @@ describe("DiamondDao contract", function () {
       );
     });
 
+    it("should revert propose with zero address target", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const targets = [zeroAddress];
+      const values = [1n];
+      const calldatas = [EmptyBytes];
+      const majority = OpenProposalMajority.Low;
+
+      await hhViem.assertions.revertWithCustomError(
+        dao.write.propose(
+          [
+            targets,
+            values,
+            calldatas,
+            "title",
+            "test",
+            "url",
+            majority,
+          ],
+          { value: CreateProposalFee },
+        ),
+        dao,
+        "InvalidArgument",
+      );
+    });
+
     it("should revert propose without proposal fee payment", async function () {
       const { dao } = await helpers.loadFixture(deployFixture);
 
