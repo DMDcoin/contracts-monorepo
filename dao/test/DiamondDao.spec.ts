@@ -375,6 +375,22 @@ describe("DiamondDao contract", function () {
       }
     });
 
+    it("should switch DAO phase to Voting and keep canceled proposal state", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+
+      const { proposalId: canceledProposalId } = await createProposal(dao, proposer.account);
+      const { proposalId } = await createProposal(dao, users[3].account);
+
+      assert.ok(await dao.write.cancel([canceledProposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+
+      assert.equal((await dao.read.getProposal([canceledProposalId])).state, ProposalState.Canceled);
+      assert.equal((await dao.read.getProposal([proposalId])).state, ProposalState.Active);
+    });
+
     it("should switch DAO phase from Voting to Proposal and clear current phase proposals", async function () {
       const { dao } = await helpers.loadFixture(deployFixture);
 
@@ -400,6 +416,114 @@ describe("DiamondDao contract", function () {
       }
 
       assert.equal((await dao.read.getCurrentPhaseProposals()).length, 0);
+    });
+
+    it("should switch DAO phase from Voting to Proposal and keep canceled proposal state", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+
+      const { proposalId: canceledProposalId } = await createProposal(dao, proposer.account);
+      const { proposalId } = await createProposal(dao, users[3].account);
+
+      assert.ok(await dao.write.cancel([canceledProposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+      await swithPhase(dao);
+
+      assert.equal((await dao.read.getProposal([canceledProposalId])).state, ProposalState.Canceled);
+      assert.equal((await dao.read.getProposal([proposalId])).state, ProposalState.VotingFinished);
+    });
+
+    it("should switch DAO phase to Voting and transfer canceled proposals fee to reinsert pot", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposals = [];
+
+      proposals.push(await createProposal(dao, users[2].account, { description: users[2].account.address }));
+      proposals.push(await createProposal(dao, users[3].account, { description: users[3].account.address }));
+      proposals.push(await createProposal(dao, users[4].account, { description: users[4].account.address }));
+
+      assert.ok(await dao.write.cancel([proposals[0].proposalId, "reason"], { account: users[2].account }));
+      assert.ok(await dao.write.cancel([proposals[1].proposalId, "reason"], { account: users[3].account }));
+
+      const [, end, ,] = await dao.read.daoPhase();
+      await helpers.time.increaseTo(end + 1n);
+
+      await hhViem.assertions.balancesHaveChanged(
+        dao.write.switchPhase(),
+        [
+          {
+            address: dao.address,
+            amount: -2n * CreateProposalFee,
+          },
+          {
+            address: reinsertPot.account.address,
+            amount: 2n * CreateProposalFee,
+          }
+        ],
+      );
+    });
+
+    it("should switch DAO phase from Voting to Proposal and not transfer canceled proposal fee again", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+
+      const [, end, ,] = await dao.read.daoPhase();
+      await helpers.time.increaseTo(end + 1n);
+
+      await hhViem.assertions.balancesHaveChanged(
+        dao.write.switchPhase(),
+        [
+          {
+            address: dao.address,
+            amount: 0n,
+          },
+          {
+            address: reinsertPot.account.address,
+            amount: 0n,
+          }
+        ],
+      );
+    });
+
+    it("should switch DAO phase to Voting and decrease unfinalized proposals count", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+
+      const { proposalId } = await createProposal(dao, proposer.account);
+      await createProposal(dao, users[3].account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      assert.equal(await dao.read.unfinalizedProposals(), 2n);
+
+      await swithPhase(dao);
+
+      assert.equal(await dao.read.unfinalizedProposals(), 1n);
+    });
+
+    it("should switch DAO phase from Voting to Proposal and not decrease unfinalized proposals count again", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+
+      const { proposalId } = await createProposal(dao, proposer.account);
+      await createProposal(dao, users[3].account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+      await swithPhase(dao);
+
+      assert.equal(await dao.read.unfinalizedProposals(), 1n);
     });
   });
 
@@ -882,6 +1006,111 @@ describe("DiamondDao contract", function () {
 
       const [, , , canceledAfter] = await dao.read.statistic();
       assert.equal(canceledAfter, canceledBefore + 1n);
+    });
+
+    it("should not allow to vote for canceled proposal", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[1];
+      const voter = users[10];
+
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, [voter]);
+
+      await swithPhase(dao);
+
+      await hhViem.assertions.revertWithCustomErrorWithArgs(
+        dao.write.vote([proposalId, Vote.Yes], { account: voter.account }),
+        dao,
+        "UnexpectedProposalState",
+        [proposalId, ProposalState.Canceled],
+      );
+    });
+
+    it("should not allow to finalize canceled proposal", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[1];
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+      await swithPhase(dao);
+
+      await hhViem.assertions.revertWithCustomErrorWithArgs(
+        dao.write.finalize([proposalId]),
+        dao,
+        "UnexpectedProposalState",
+        [proposalId, ProposalState.Canceled],
+      );
+    });
+
+    it("should not allow to execute canceled proposal", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[1];
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+      await swithPhase(dao);
+
+      await hhViem.assertions.revertWithCustomErrorWithArgs(
+        dao.write.execute([proposalId], { account: proposer.account }),
+        dao,
+        "UnexpectedProposalState",
+        [proposalId, ProposalState.Canceled],
+      );
+    });
+
+    it("should not block new proposals after proposal cancel", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+      await swithPhase(dao);
+
+      assert.equal(await dao.read.unfinalizedProposals(), 0n);
+      assert.equal(await dao.read.unfinalizedProposalsExist(), false);
+
+      await createProposal(dao, users[3].account);
+    });
+
+    it("should not block new proposals after proposal cancel and finalization of other proposals", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+      const voters = users.slice(10, 20);
+
+      const { proposalId: canceledProposalId } = await createProposal(dao, proposer.account);
+      const { proposalId } = await createProposal(dao, users[3].account);
+
+      assert.ok(await dao.write.cancel([canceledProposalId, "reason"], { account: proposer.account }));
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+      await swithPhase(dao);
+
+      await hhViem.assertions.revertWithCustomError(
+        createProposal(dao, users[4].account),
+        dao,
+        "UnfinalizedProposalsExist",
+      );
+
+      assert.ok(await dao.write.finalize([proposalId]));
+
+      await createProposal(dao, users[4].account);
     });
   });
 

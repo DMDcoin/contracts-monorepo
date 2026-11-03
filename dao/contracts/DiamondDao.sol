@@ -230,14 +230,30 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
 
         bool snapshotStakes = stateToSet == ProposalState.VotingFinished;
 
+        uint256 canceledProposals = 0;
+        uint256 canceledProposalsFee = 0;
+
         uint256 proposalsLength = currentPhaseProposals.length;
         for (uint256 i = 0; i < proposalsLength; ++i) {
             uint256 proposalId = currentPhaseProposals[i];
 
-            proposals[proposalId].state = stateToSet;
+            Proposal storage proposal = proposals[proposalId];
+
+            // canceled proposal state must not be changed,
+            // its fee goes to the reinsert pot on voting phase start
+            if (proposal.state == ProposalState.Canceled) {
+                if (newPhase == Phase.Voting) {
+                    canceledProposals += 1;
+                    canceledProposalsFee += proposal.proposalFee;
+                }
+
+                continue;
+            }
+
+            proposal.state = stateToSet;
 
             if (snapshotStakes) {
-                proposals[proposalId].votingDaoEpoch = daoPhase.daoEpoch;
+                proposal.votingDaoEpoch = daoPhase.daoEpoch;
             }
         }
 
@@ -251,6 +267,13 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
             daoPhaseProposals[daoPhaseCount] = currentPhaseProposals;
             daoPhaseCount += 1;
             delete currentPhaseProposals;
+        }
+
+        if (canceledProposals != 0) {
+            unfinalizedProposals -= canceledProposals;
+
+            // send canceled proposals fee to the reinsert pot
+            _transfer(reinsertPot, canceledProposalsFee);
         }
 
         emit SwitchDaoPhase(daoPhase.phase, daoPhase.start, daoPhase.end);
