@@ -1,6 +1,6 @@
 {
     "name": "diamond-contracts-views",
-    "version": "4.0.0",
+    "version": "4.0.3",
     "description": "DMD Diamond view contracts",
     "type": "module",
     "scripts": {
