@@ -47,6 +47,10 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
     /// therefore the full cycle duration is double that amount.
     uint64 public constant DAO_PHASE_DURATION = 7 days;
 
+    /// @dev gas limit for the proposal fee refund transfer to the proposer,
+    /// so the proposer is not able to consume all the gas of finalization.
+    uint256 public constant PROPOSAL_FEE_REFUND_GAS_LIMIT = 30_000;
+
     address public reinsertPot;
     uint256 public createProposalFee;
 
@@ -94,6 +98,9 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
     mapping(uint256 => uint256[]) public daoPhaseProposals;
 
     IDiamondDaoLowMajority public lowMajorityDao;
+
+    /// @dev proposer => amount - Accepted proposals fees available to claim
+    mapping(address => uint256) public proposalFeeRefunds;
 
     modifier exists(uint256 proposalId) {
         if (!proposalExists(proposalId)) {
@@ -438,8 +445,13 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
         if (accepted) {
             statistic.accepted += 1;
 
-            // return fee back to the proposer
-            _transfer(proposal.proposer, proposal.proposalFee);
+            // return fee back to the proposer, if transfer fails
+            // it can be claimed later by the proposer only
+            if (!_tryTransfer(proposal.proposer, proposal.proposalFee)) {
+                proposalFeeRefunds[proposal.proposer] += proposal.proposalFee;
+
+                emit ProposalFeeRefundFailed(proposal.proposer, proposalId, proposal.proposalFee);
+            }
         } else {
             statistic.declined += 1;
 
@@ -469,6 +481,21 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
         }
 
         emit ProposalExecuted(msg.sender, proposalId);
+    }
+
+    function claimProposalFee() external nonReentrant {
+        address proposer = msg.sender;
+        uint256 amount = proposalFeeRefunds[proposer];
+
+        if (amount == 0) {
+            revert NothingToClaim();
+        }
+
+        proposalFeeRefunds[proposer] = 0;
+
+        _transfer(proposer, amount);
+
+        emit ProposalFeeClaimed(proposer, amount);
     }
 
     function getCurrentPhaseProposals() external view returns (uint256[] memory) {
@@ -656,6 +683,13 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
         (bool success,) = recipient.call{value: amount}("");
         if (!success) {
             revert TransferFailed(address(this), recipient, amount);
+        }
+    }
+
+    function _tryTransfer(address recipient, uint256 amount) private returns (bool success) {
+        // limited gas and no return data copy
+        assembly {
+            success := call(PROPOSAL_FEE_REFUND_GAS_LIMIT, recipient, amount, 0, 0, 0, 0)
         }
     }
 

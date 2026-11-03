@@ -5,6 +5,7 @@ import type { } from "../../artifacts/contracts/DiamondDaoLowMajority.sol/artifa
 
 import type { } from "../../artifacts/contracts/mocks/MockDiamondDaoLowMajority.sol/artifacts.js";
 import type { } from "../../artifacts/contracts/mocks/MockEtherReceiver.sol/artifacts.js";
+import type { } from "../../artifacts/contracts/mocks/MockProposer.sol/artifacts.js";
 import type { } from "../../artifacts/contracts/mocks/MockQuorumCalculator.sol/artifacts.js";
 import type { } from "../../artifacts/contracts/mocks/MockStakingHbbft.sol/artifacts.js";
 import type { } from "../../artifacts/contracts/mocks/MockTokens.sol/artifacts.js";
@@ -21,6 +22,7 @@ export type MockDiamondDaoLowMajority = ContractReturnType<"MockDiamondDaoLowMaj
 export type MockStakingHbbft = ContractReturnType<"MockStakingHbbft">;
 export type MockValidatorSetHbbft = ContractReturnType<"MockValidatorSetHbbft">;
 export type MockEtherReceiver = ContractReturnType<"MockEtherReceiver">;
+export type MockProposer = ContractReturnType<"MockProposer">;
 export type MockERC20 = ContractReturnType<"MockERC20">;
 export type MockERC721 = ContractReturnType<"MockERC721">;
 export type MockERC1155 = ContractReturnType<"MockERC1155">;
