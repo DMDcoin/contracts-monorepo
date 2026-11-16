@@ -15,7 +15,7 @@ import {
   Vote
 } from "./fixtures/proposal.js";
 
-import { DiamondDao, MockValidatorSetHbbft, MockStakingHbbft, DaoPhase } from "./fixtures/types.js";
+import { DiamondDao, MockValidatorSetHbbft, MockStakingHbbft, MockProposer, DaoPhase } from "./fixtures/types.js";
 import { EmptyBytes, getRandomBigInt } from "./fixtures/utils.js";
 
 const connection = await hre.network.getOrCreate();
@@ -110,6 +110,41 @@ describe("DiamondDao contract", function () {
     for (const voter of voters) {
       await dao.write.changeVote([proposalId, vote, ""], { account: voter.account });
     }
+  }
+
+  async function proposeByContract(
+    dao: DiamondDao,
+    proposerContract: MockProposer,
+    proposalDescription?: string
+  ) {
+    const targets = [getAddress(users[3].account.address)];
+    const values = [parseEther("1")];
+    const calldatas = [EmptyBytes];
+    const description = proposalDescription ? proposalDescription : "contract proposal";
+
+    const proposalId = await dao.read.hashProposal([
+      targets,
+      values,
+      calldatas,
+      description
+    ]);
+
+    await proposerContract.write.propose(
+      [
+        targets,
+        values,
+        calldatas,
+        "title",
+        description,
+        "url",
+        OpenProposalMajority.Low,
+      ],
+      { value: CreateProposalFee }
+    );
+
+    assert.ok(await dao.read.proposalExists([proposalId]));
+
+    return proposalId;
   }
 
   describe("initializer", async function () {
@@ -375,6 +410,22 @@ describe("DiamondDao contract", function () {
       }
     });
 
+    it("should switch DAO phase to Voting and keep canceled proposal state", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+
+      const { proposalId: canceledProposalId } = await createProposal(dao, proposer.account);
+      const { proposalId } = await createProposal(dao, users[3].account);
+
+      assert.ok(await dao.write.cancel([canceledProposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+
+      assert.equal((await dao.read.getProposal([canceledProposalId])).state, ProposalState.Canceled);
+      assert.equal((await dao.read.getProposal([proposalId])).state, ProposalState.Active);
+    });
+
     it("should switch DAO phase from Voting to Proposal and clear current phase proposals", async function () {
       const { dao } = await helpers.loadFixture(deployFixture);
 
@@ -400,6 +451,114 @@ describe("DiamondDao contract", function () {
       }
 
       assert.equal((await dao.read.getCurrentPhaseProposals()).length, 0);
+    });
+
+    it("should switch DAO phase from Voting to Proposal and keep canceled proposal state", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+
+      const { proposalId: canceledProposalId } = await createProposal(dao, proposer.account);
+      const { proposalId } = await createProposal(dao, users[3].account);
+
+      assert.ok(await dao.write.cancel([canceledProposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+      await swithPhase(dao);
+
+      assert.equal((await dao.read.getProposal([canceledProposalId])).state, ProposalState.Canceled);
+      assert.equal((await dao.read.getProposal([proposalId])).state, ProposalState.VotingFinished);
+    });
+
+    it("should switch DAO phase to Voting and transfer canceled proposals fee to reinsert pot", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposals = [];
+
+      proposals.push(await createProposal(dao, users[2].account, { description: users[2].account.address }));
+      proposals.push(await createProposal(dao, users[3].account, { description: users[3].account.address }));
+      proposals.push(await createProposal(dao, users[4].account, { description: users[4].account.address }));
+
+      assert.ok(await dao.write.cancel([proposals[0].proposalId, "reason"], { account: users[2].account }));
+      assert.ok(await dao.write.cancel([proposals[1].proposalId, "reason"], { account: users[3].account }));
+
+      const [, end, ,] = await dao.read.daoPhase();
+      await helpers.time.increaseTo(end + 1n);
+
+      await hhViem.assertions.balancesHaveChanged(
+        dao.write.switchPhase(),
+        [
+          {
+            address: dao.address,
+            amount: -2n * CreateProposalFee,
+          },
+          {
+            address: reinsertPot.account.address,
+            amount: 2n * CreateProposalFee,
+          }
+        ],
+      );
+    });
+
+    it("should switch DAO phase from Voting to Proposal and not transfer canceled proposal fee again", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+
+      const [, end, ,] = await dao.read.daoPhase();
+      await helpers.time.increaseTo(end + 1n);
+
+      await hhViem.assertions.balancesHaveChanged(
+        dao.write.switchPhase(),
+        [
+          {
+            address: dao.address,
+            amount: 0n,
+          },
+          {
+            address: reinsertPot.account.address,
+            amount: 0n,
+          }
+        ],
+      );
+    });
+
+    it("should switch DAO phase to Voting and decrease unfinalized proposals count", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+
+      const { proposalId } = await createProposal(dao, proposer.account);
+      await createProposal(dao, users[3].account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      assert.equal(await dao.read.unfinalizedProposals(), 2n);
+
+      await swithPhase(dao);
+
+      assert.equal(await dao.read.unfinalizedProposals(), 1n);
+    });
+
+    it("should switch DAO phase from Voting to Proposal and not decrease unfinalized proposals count again", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+
+      const { proposalId } = await createProposal(dao, proposer.account);
+      await createProposal(dao, users[3].account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+      await swithPhase(dao);
+
+      assert.equal(await dao.read.unfinalizedProposals(), 1n);
     });
   });
 
@@ -475,6 +634,32 @@ describe("DiamondDao contract", function () {
             "url",
             majority,
           ], { value: CreateProposalFee }
+        ),
+        dao,
+        "InvalidArgument",
+      );
+    });
+
+    it("should revert propose with zero address target", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const targets = [zeroAddress];
+      const values = [1n];
+      const calldatas = [EmptyBytes];
+      const majority = OpenProposalMajority.Low;
+
+      await hhViem.assertions.revertWithCustomError(
+        dao.write.propose(
+          [
+            targets,
+            values,
+            calldatas,
+            "title",
+            "test",
+            "url",
+            majority,
+          ],
+          { value: CreateProposalFee },
         ),
         dao,
         "InvalidArgument",
@@ -856,6 +1041,111 @@ describe("DiamondDao contract", function () {
 
       const [, , , canceledAfter] = await dao.read.statistic();
       assert.equal(canceledAfter, canceledBefore + 1n);
+    });
+
+    it("should not allow to vote for canceled proposal", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[1];
+      const voter = users[10];
+
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, [voter]);
+
+      await swithPhase(dao);
+
+      await hhViem.assertions.revertWithCustomErrorWithArgs(
+        dao.write.vote([proposalId, Vote.Yes], { account: voter.account }),
+        dao,
+        "UnexpectedProposalState",
+        [proposalId, ProposalState.Canceled],
+      );
+    });
+
+    it("should not allow to finalize canceled proposal", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[1];
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+      await swithPhase(dao);
+
+      await hhViem.assertions.revertWithCustomErrorWithArgs(
+        dao.write.finalize([proposalId]),
+        dao,
+        "UnexpectedProposalState",
+        [proposalId, ProposalState.Canceled],
+      );
+    });
+
+    it("should not allow to execute canceled proposal", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[1];
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+      await swithPhase(dao);
+
+      await hhViem.assertions.revertWithCustomErrorWithArgs(
+        dao.write.execute([proposalId], { account: proposer.account }),
+        dao,
+        "UnexpectedProposalState",
+        [proposalId, ProposalState.Canceled],
+      );
+    });
+
+    it("should not block new proposals after proposal cancel", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      assert.ok(await dao.write.cancel([proposalId, "reason"], { account: proposer.account }));
+
+      await swithPhase(dao);
+      await swithPhase(dao);
+
+      assert.equal(await dao.read.unfinalizedProposals(), 0n);
+      assert.equal(await dao.read.unfinalizedProposalsExist(), false);
+
+      await createProposal(dao, users[3].account);
+    });
+
+    it("should not block new proposals after proposal cancel and finalization of other proposals", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+      const voters = users.slice(10, 20);
+
+      const { proposalId: canceledProposalId } = await createProposal(dao, proposer.account);
+      const { proposalId } = await createProposal(dao, users[3].account);
+
+      assert.ok(await dao.write.cancel([canceledProposalId, "reason"], { account: proposer.account }));
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+      await swithPhase(dao);
+
+      await hhViem.assertions.revertWithCustomError(
+        createProposal(dao, users[4].account),
+        dao,
+        "UnfinalizedProposalsExist",
+      );
+
+      assert.ok(await dao.write.finalize([proposalId]));
+
+      await createProposal(dao, users[4].account);
     });
   });
 
@@ -1494,6 +1784,174 @@ describe("DiamondDao contract", function () {
       );
     });
 
+    it("should finalize accepted proposal and transfer fee back to proposer contract", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const voters = users.slice(10, 20);
+      const proposerContract = await hhViem.deployContract("MockProposer", [dao.address]);
+
+      const proposalId = await proposeByContract(dao, proposerContract);
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+      await swithPhase(dao);
+
+      const hash = await dao.write.finalize([proposalId]);
+
+      await hhViem.assertions.balancesHaveChanged(
+        hash,
+        [
+          {
+            address: dao.address,
+            amount: -CreateProposalFee,
+          },
+          {
+            address: proposerContract.address,
+            amount: CreateProposalFee,
+          }
+        ],
+      );
+
+      const receipt = await publicClient.getTransactionReceipt({ hash });
+
+      const logs = await publicClient.getContractEvents({
+        address: dao.address,
+        abi: dao.abi,
+        eventName: 'ProposalFeeRefundFailed',
+        fromBlock: receipt.blockNumber,
+        toBlock: receipt.blockNumber
+      });
+
+      assert.strictEqual(logs.length, 0, "should not emit event");
+      assert.equal(await dao.read.proposalFeeRefunds([proposerContract.address]), 0n);
+    });
+
+    it("should finalize accepted proposal if proposer rejects fee transfer", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const voters = users.slice(10, 20);
+      const proposerContract = await hhViem.deployContract("MockProposer", [dao.address]);
+
+      const proposalId = await proposeByContract(dao, proposerContract);
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+
+      await proposerContract.write.toggleReceive([false]);
+
+      await swithPhase(dao);
+
+      const tx = dao.write.finalize([proposalId], { account: owner.account });
+
+      await hhViem.assertions.emitWithArgs(
+        tx,
+        dao,
+        "VotingFinalized",
+        [owner.account.address, proposalId, true],
+      );
+
+      await hhViem.assertions.emitWithArgs(
+        tx,
+        dao,
+        "ProposalFeeRefundFailed",
+        [getAddress(proposerContract.address), proposalId, CreateProposalFee],
+      );
+
+      assert.equal((await dao.read.getProposal([proposalId])).state, ProposalState.Accepted);
+      assert.equal(await dao.read.unfinalizedProposals(), 0n);
+      assert.equal(
+        await dao.read.proposalFeeRefunds([proposerContract.address]),
+        CreateProposalFee,
+      );
+    });
+
+    it("should not block new proposals if proposer rejects fee transfer", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+      const voters = users.slice(10, 20);
+      const proposerContract = await hhViem.deployContract("MockProposer", [dao.address]);
+
+      const proposalId = await proposeByContract(dao, proposerContract);
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+
+      await proposerContract.write.toggleReceive([false]);
+
+      await swithPhase(dao);
+
+      await hhViem.assertions.revertWithCustomError(
+        dao.write.propose(
+          [
+            [users[3].account.address],
+            [parseEther("1")],
+            [EmptyBytes],
+            "title",
+            "test",
+            "url",
+            OpenProposalMajority.Low,
+          ],
+          { value: CreateProposalFee, account: proposer.account }
+        ),
+        dao,
+        "UnfinalizedProposalsExist",
+      );
+
+      assert.ok(await dao.write.finalize([proposalId]));
+
+      await createProposal(dao, proposer.account);
+    });
+
+    it("should finalize accepted proposal if proposer consumes all gas on fee transfer", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const voters = users.slice(10, 20);
+      const proposerContract = await hhViem.deployContract("MockProposer", [dao.address]);
+
+      const proposalId = await proposeByContract(dao, proposerContract);
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+
+      await proposerContract.write.toggleConsumeGas([true]);
+
+      await swithPhase(dao);
+
+      // explicit gas limit, otherwise gas estimation will increase it
+      // until the proposer is not able to consume all of it
+      const tx = dao.write.finalize([proposalId], { account: owner.account, gas: 500_000n });
+
+      await hhViem.assertions.emitWithArgs(
+        tx,
+        dao,
+        "VotingFinalized",
+        [owner.account.address, proposalId, true],
+      );
+
+      await hhViem.assertions.emitWithArgs(
+        tx,
+        dao,
+        "ProposalFeeRefundFailed",
+        [getAddress(proposerContract.address), proposalId, CreateProposalFee],
+      );
+
+      assert.equal((await dao.read.getProposal([proposalId])).state, ProposalState.Accepted);
+      assert.equal(await dao.read.unfinalizedProposals(), 0n);
+      assert.equal(
+        await dao.read.proposalFeeRefunds([proposerContract.address]),
+        CreateProposalFee,
+      );
+    });
+
     it("should finalize declined proposal and emit event", async function () {
       const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
 
@@ -1741,6 +2199,377 @@ describe("DiamondDao contract", function () {
           {
             address: userToFund.account.address,
             amount: fundAmount,
+          }
+        ],
+      );
+
+      assert.equal(await dao.read.governancePot(), 0n);
+    });
+  });
+
+  describe("claimProposalFee", async function () {
+    it("should revert claim if there is no fee to claim", async function () {
+      const { dao } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+
+      await hhViem.assertions.revertWithCustomError(
+        dao.write.claimProposalFee({ account: proposer.account }),
+        dao,
+        "NothingToClaim",
+      );
+    });
+
+    it("should revert claim of unfinalized proposal fee", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+      const voters = users.slice(10, 20);
+
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+      await swithPhase(dao);
+
+      assert.equal(
+        (await dao.read.getProposal([proposalId])).state,
+        ProposalState.VotingFinished
+      );
+
+      await hhViem.assertions.revertWithCustomError(
+        dao.write.claimProposalFee({ account: proposer.account }),
+        dao,
+        "NothingToClaim",
+      );
+    });
+
+    it("should revert claim of declined proposal fee", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+      const voters = users.slice(10, 20);
+
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.No);
+      await swithPhase(dao);
+
+      assert.ok(await dao.write.finalize([proposalId]));
+      assert.equal((await dao.read.getProposal([proposalId])).state, ProposalState.Declined);
+
+      await hhViem.assertions.revertWithCustomError(
+        dao.write.claimProposalFee({ account: proposer.account }),
+        dao,
+        "NothingToClaim",
+      );
+    });
+
+    it("should revert claim of fee transferred on finalization", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+      const voters = users.slice(10, 20);
+
+      const { proposalId } = await createProposal(dao, proposer.account);
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+      await swithPhase(dao);
+
+      assert.ok(await dao.write.finalize([proposalId]));
+      assert.equal(await dao.read.proposalFeeRefunds([proposer.account.address]), 0n);
+
+      await hhViem.assertions.revertWithCustomError(
+        dao.write.claimProposalFee({ account: proposer.account }),
+        dao,
+        "NothingToClaim",
+      );
+    });
+
+    it("should not allow to claim fee of another proposer", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const caller = users[3];
+      const voters = users.slice(10, 20);
+      const proposerContract = await hhViem.deployContract("MockProposer", [dao.address]);
+
+      const proposalId = await proposeByContract(dao, proposerContract);
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+      await swithPhase(dao);
+
+      await proposerContract.write.toggleReceive([false]);
+      assert.ok(await dao.write.finalize([proposalId]));
+
+      await hhViem.assertions.revertWithCustomError(
+        dao.write.claimProposalFee({ account: caller.account }),
+        dao,
+        "NothingToClaim",
+      );
+
+      assert.equal(
+        await dao.read.proposalFeeRefunds([proposerContract.address]),
+        CreateProposalFee,
+      );
+    });
+
+    it("should claim proposal fee and emit event", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const voters = users.slice(10, 20);
+      const proposerContract = await hhViem.deployContract("MockProposer", [dao.address]);
+
+      const proposalId = await proposeByContract(dao, proposerContract);
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+      await swithPhase(dao);
+
+      await proposerContract.write.toggleReceive([false]);
+      assert.ok(await dao.write.finalize([proposalId]));
+      await proposerContract.write.toggleReceive([true]);
+
+      await hhViem.assertions.emitWithArgs(
+        proposerContract.write.claimProposalFee(),
+        dao,
+        "ProposalFeeClaimed",
+        [getAddress(proposerContract.address), CreateProposalFee],
+      );
+    });
+
+    it("should claim proposal fee and transfer it to proposer", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const voters = users.slice(10, 20);
+      const proposerContract = await hhViem.deployContract("MockProposer", [dao.address]);
+
+      const proposalId = await proposeByContract(dao, proposerContract);
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+      await swithPhase(dao);
+
+      await proposerContract.write.toggleReceive([false]);
+      assert.ok(await dao.write.finalize([proposalId]));
+      await proposerContract.write.toggleReceive([true]);
+
+      await hhViem.assertions.balancesHaveChanged(
+        proposerContract.write.claimProposalFee(),
+        [
+          {
+            address: dao.address,
+            amount: -CreateProposalFee,
+          },
+          {
+            address: proposerContract.address,
+            amount: CreateProposalFee,
+          }
+        ],
+      );
+    });
+
+    it("should claim proposal fee and reset claimable amount", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const voters = users.slice(10, 20);
+      const proposerContract = await hhViem.deployContract("MockProposer", [dao.address]);
+
+      const proposalId = await proposeByContract(dao, proposerContract);
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+      await swithPhase(dao);
+
+      await proposerContract.write.toggleReceive([false]);
+      assert.ok(await dao.write.finalize([proposalId]));
+      await proposerContract.write.toggleReceive([true]);
+
+      assert.ok(await proposerContract.write.claimProposalFee());
+
+      assert.equal(await dao.read.proposalFeeRefunds([proposerContract.address]), 0n);
+
+      await hhViem.assertions.revertWithCustomError(
+        proposerContract.write.claimProposalFee(),
+        dao,
+        "NothingToClaim",
+      );
+    });
+
+    it("should claim accumulated fees of multiple accepted proposals", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const voters = users.slice(10, 20);
+      const proposerContract = await hhViem.deployContract("MockProposer", [dao.address]);
+
+      const firstProposalId = await proposeByContract(dao, proposerContract, "first proposal");
+      const secondProposalId = await proposeByContract(dao, proposerContract, "second proposal");
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, firstProposalId, voters, Vote.Yes);
+      await vote(dao, secondProposalId, voters, Vote.Yes);
+      await swithPhase(dao);
+
+      await proposerContract.write.toggleReceive([false]);
+      assert.ok(await dao.write.finalize([firstProposalId]));
+      assert.ok(await dao.write.finalize([secondProposalId]));
+      await proposerContract.write.toggleReceive([true]);
+
+      const expectedAmount = CreateProposalFee * 2n;
+
+      assert.equal(
+        await dao.read.proposalFeeRefunds([proposerContract.address]),
+        expectedAmount,
+      );
+
+      await hhViem.assertions.emitWithArgs(
+        proposerContract.write.claimProposalFee(),
+        dao,
+        "ProposalFeeClaimed",
+        [getAddress(proposerContract.address), expectedAmount],
+      );
+    });
+
+    it("should revert claim if proposer rejects fee transfer", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const voters = users.slice(10, 20);
+      const proposerContract = await hhViem.deployContract("MockProposer", [dao.address]);
+
+      const proposalId = await proposeByContract(dao, proposerContract);
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, proposalId, voters, Vote.Yes);
+      await swithPhase(dao);
+
+      await proposerContract.write.toggleReceive([false]);
+      assert.ok(await dao.write.finalize([proposalId]));
+
+      await hhViem.assertions.revertWithCustomErrorWithArgs(
+        proposerContract.write.claimProposalFee(),
+        dao,
+        "TransferFailed",
+        [getAddress(dao.address), getAddress(proposerContract.address), CreateProposalFee],
+      );
+
+      assert.equal(
+        await dao.read.proposalFeeRefunds([proposerContract.address]),
+        CreateProposalFee,
+      );
+
+      await proposerContract.write.toggleReceive([true]);
+
+      await hhViem.assertions.balancesHaveChanged(
+        proposerContract.write.claimProposalFee(),
+        [
+          {
+            address: dao.address,
+            amount: -CreateProposalFee,
+          },
+          {
+            address: proposerContract.address,
+            amount: CreateProposalFee,
+          }
+        ],
+      );
+    });
+
+    it("should not include unclaimed proposal fee in governance pot", async function () {
+      const { dao, mockValidatorSet, mockStaking } = await helpers.loadFixture(deployFixture);
+
+      const proposer = users[2];
+      const funder = users[4];
+      const receiver = users[5].account.address;
+      const voters = users.slice(10, 20);
+      const governancePot = parseEther("100");
+      const proposerContract = await hhViem.deployContract("MockProposer", [dao.address]);
+
+      await funder.sendTransaction({ to: dao.address, value: governancePot });
+
+      const contractProposalId = await proposeByContract(dao, proposerContract);
+
+      const { proposalId: overspendProposalId } = await createProposal(dao, proposer.account, {
+        description: "spend governance pot and unclaimed fee",
+        targets: [receiver],
+        values: [governancePot + CreateProposalFee],
+        majority: OpenProposalMajority.High,
+      });
+
+      const { proposalId: spendPotProposalId } = await createProposal(dao, proposer.account, {
+        description: "spend governance pot",
+        targets: [receiver],
+        values: [governancePot],
+        majority: OpenProposalMajority.High,
+      });
+
+      await addValidatorsStake(mockValidatorSet, mockStaking, voters);
+
+      await swithPhase(dao);
+      await vote(dao, contractProposalId, voters, Vote.Yes);
+      await vote(dao, overspendProposalId, voters, Vote.Yes);
+      await vote(dao, spendPotProposalId, voters, Vote.Yes);
+      await swithPhase(dao);
+
+      await proposerContract.write.toggleReceive([false]);
+      assert.ok(await dao.write.finalize([contractProposalId]));
+      assert.ok(await dao.write.finalize([overspendProposalId]));
+      assert.ok(await dao.write.finalize([spendPotProposalId]));
+
+      assert.equal(await dao.read.governancePot(), governancePot);
+      assert.equal(
+        await dao.read.proposalFeeRefunds([proposerContract.address]),
+        CreateProposalFee,
+      );
+      assert.equal(
+        await publicClient.getBalance({ address: dao.address }),
+        governancePot + CreateProposalFee,
+      );
+
+      await assert.rejects(
+        dao.write.execute([overspendProposalId]),
+        /Arithmetic operation resulted in underflow or overflow/,
+      );
+
+      assert.ok(await dao.write.execute([spendPotProposalId]));
+
+      assert.equal(await dao.read.governancePot(), 0n);
+      assert.equal(
+        await publicClient.getBalance({ address: dao.address }),
+        CreateProposalFee,
+      );
+
+      await proposerContract.write.toggleReceive([true]);
+
+      await hhViem.assertions.balancesHaveChanged(
+        proposerContract.write.claimProposalFee(),
+        [
+          {
+            address: dao.address,
+            amount: -CreateProposalFee,
+          },
+          {
+            address: proposerContract.address,
+            amount: CreateProposalFee,
           }
         ],
       );

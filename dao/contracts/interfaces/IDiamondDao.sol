@@ -32,6 +32,14 @@ interface IDiamondDao {
         bool indexed accepted
     );
 
+    event ProposalFeeRefundFailed(
+        address indexed proposer,
+        uint256 indexed proposalId,
+        uint256 amount
+    );
+
+    event ProposalFeeClaimed(address indexed proposer, uint256 amount);
+
     event SubmitVote(address indexed voter, uint256 indexed proposalId, Vote indexed vote);
 
     event SubmitVoteWithReason(
@@ -78,6 +86,7 @@ interface IDiamondDao {
     error SameVote(uint256 proposalId, address vote, Vote _vote);
     error AlreadyVoted(uint256 proposalId, address voter);
     error NoVoteFound(uint256 proposalId, address voter);
+    error NothingToClaim();
 
     function propose(
         address[] memory targets,
@@ -98,6 +107,8 @@ interface IDiamondDao {
     function finalize(uint256 proposalId) external;
 
     function execute(uint256 proposalId) external;
+
+    function claimProposalFee() external;
 
     function proposalExists(uint256 proposalId) external view returns (bool);
 

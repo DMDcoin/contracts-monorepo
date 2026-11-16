@@ -8,6 +8,7 @@ import hardhatContractSizer from "@solidstate/hardhat-contract-sizer";
 import { daoTasks } from "./tasks/index.js";
 
 import { createBaseConfig } from "../hardhat.base.js";
+import { getUpgradeCalldata } from "../scripts/tasks/index.js";
 
 const base = createBaseConfig();
 
@@ -19,7 +20,7 @@ export default defineConfig({
         hardhatFoundry,
         hardhatContractSizer,
     ],
-    tasks: daoTasks,
+    tasks: [...daoTasks, ...getUpgradeCalldata],
     paths: {
         ...base.paths,
         tests: {

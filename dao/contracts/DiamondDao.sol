@@ -47,6 +47,10 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
     /// therefore the full cycle duration is double that amount.
     uint64 public constant DAO_PHASE_DURATION = 7 days;
 
+    /// @dev gas limit for the proposal fee refund transfer to the proposer,
+    /// so the proposer is not able to consume all the gas of finalization.
+    uint256 public constant PROPOSAL_FEE_REFUND_GAS_LIMIT = 30_000;
+
     address public reinsertPot;
     uint256 public createProposalFee;
 
@@ -94,6 +98,9 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
     mapping(uint256 => uint256[]) public daoPhaseProposals;
 
     IDiamondDaoLowMajority public lowMajorityDao;
+
+    /// @dev proposer => amount - Accepted proposals fees available to claim
+    mapping(address => uint256) public proposalFeeRefunds;
 
     modifier exists(uint256 proposalId) {
         if (!proposalExists(proposalId)) {
@@ -230,14 +237,30 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
 
         bool snapshotStakes = stateToSet == ProposalState.VotingFinished;
 
+        uint256 canceledProposals = 0;
+        uint256 canceledProposalsFee = 0;
+
         uint256 proposalsLength = currentPhaseProposals.length;
         for (uint256 i = 0; i < proposalsLength; ++i) {
             uint256 proposalId = currentPhaseProposals[i];
 
-            proposals[proposalId].state = stateToSet;
+            Proposal storage proposal = proposals[proposalId];
+
+            // canceled proposal state must not be changed,
+            // its fee goes to the reinsert pot on voting phase start
+            if (proposal.state == ProposalState.Canceled) {
+                if (newPhase == Phase.Voting) {
+                    canceledProposals += 1;
+                    canceledProposalsFee += proposal.proposalFee;
+                }
+
+                continue;
+            }
+
+            proposal.state = stateToSet;
 
             if (snapshotStakes) {
-                proposals[proposalId].votingDaoEpoch = daoPhase.daoEpoch;
+                proposal.votingDaoEpoch = daoPhase.daoEpoch;
             }
         }
 
@@ -251,6 +274,13 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
             daoPhaseProposals[daoPhaseCount] = currentPhaseProposals;
             daoPhaseCount += 1;
             delete currentPhaseProposals;
+        }
+
+        if (canceledProposals != 0) {
+            unfinalizedProposals -= canceledProposals;
+
+            // send canceled proposals fee to the reinsert pot
+            _transfer(reinsertPot, canceledProposalsFee);
         }
 
         emit SwitchDaoPhase(daoPhase.phase, daoPhase.start, daoPhase.end);
@@ -280,7 +310,7 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
             revert NewProposalsLimitExceeded();
         }
 
-        ProposalType proposalType = _checkProposalType(targets, calldatas);
+        ProposalType proposalType = _classifyProposal(targets, values, calldatas);
 
         // If proposal calldata decoding results to open proposal and High Majority was explicitly
         // set by the caller - treat this proposal as Open with required High Majority voting.
@@ -415,8 +445,13 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
         if (accepted) {
             statistic.accepted += 1;
 
-            // return fee back to the proposer
-            _transfer(proposal.proposer, proposal.proposalFee);
+            // return fee back to the proposer, if transfer fails
+            // it can be claimed later by the proposer only
+            if (!_tryTransfer(proposal.proposer, proposal.proposalFee)) {
+                proposalFeeRefunds[proposal.proposer] += proposal.proposalFee;
+
+                emit ProposalFeeRefundFailed(proposal.proposer, proposalId, proposal.proposalFee);
+            }
         } else {
             statistic.declined += 1;
 
@@ -446,6 +481,21 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
         }
 
         emit ProposalExecuted(msg.sender, proposalId);
+    }
+
+    function claimProposalFee() external nonReentrant {
+        address proposer = msg.sender;
+        uint256 amount = proposalFeeRefunds[proposer];
+
+        if (amount == 0) {
+            revert NothingToClaim();
+        }
+
+        proposalFeeRefunds[proposer] = 0;
+
+        _transfer(proposer, amount);
+
+        emit ProposalFeeClaimed(proposer, amount);
     }
 
     function getCurrentPhaseProposals() external view returns (uint256[] memory) {
@@ -636,6 +686,13 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
         }
     }
 
+    function _tryTransfer(address recipient, uint256 amount) private returns (bool success) {
+        // limited gas and no return data copy
+        assembly {
+            success := call(PROPOSAL_FEE_REFUND_GAS_LIMIT, recipient, amount, 0, 0, 0, 0)
+        }
+    }
+
     function _requireState(uint256 _proposalId, ProposalState _state) private view {
         ProposalState state = getProposal(_proposalId).state;
 
@@ -682,50 +739,91 @@ contract DiamondDao is IDiamondDao, Initializable, ReentrancyGuardUpgradeable, V
         }
     }
 
-    /// @dev Returns the type of proposal based on the given targets and calldatas.
+    /// @dev Returns the type of proposal based on its operations.
     /// @param targets The array of target addresses.
+    /// @param values The array of values to be sent.
     /// @param calldatas The array of calldata bytes.
-    /// @return _type The type of proposal (Open, EcosystemParameterChange, or ContractUpgrade).
-    function _checkProposalType(
+    /// @return The type of proposal (Open, EcosystemParameterChange, or ContractUpgrade).
+    function _classifyProposal(
         address[] memory targets,
+        uint256[] memory values,
         bytes[] memory calldatas
-    ) private view returns (ProposalType _type) {
-        _type = ProposalType.OpenLowMajority;
+    ) private view returns (ProposalType) {
+        bool hasFundsTransfer = false;
+        bool hasParameterChange = false;
 
-        for (uint256 i = 0; i < calldatas.length; i++) {
-            if (calldatas[i].length == 0) continue;
+        for (uint256 i = 0; i < targets.length; ++i) {
+            ProposalType operationType = _classifyOperation(targets[i], values[i], calldatas[i]);
 
-            (bytes4 setFuncSelector, uint256 newVal) = _extractCallData(calldatas[i]);
-
-            // Perform the low-level call to check if the allowed ranges are defined on the target contract's method.
-            // This is done to avoid calling isWithinAllowedRange, which will revert if ranges are not defined.
-            // Only for core contracts with defined ranges, the proposal type is set to EcosystemParameterChange.
-            // All others are treated as ContractUpgrade by default.
-            (bool success, bytes memory result) = targets[i].staticcall(
-                abi.encodeWithSelector(
-                    ICoreValueGuard(targets[i]).getAllowedParamsRangeWithSelector.selector,
-                    setFuncSelector
-                )
-            );
-
-            if (success && result.length > 0) {
-                ICoreValueGuard.ParameterRange memory rangeData =
-                    abi.decode(result, (ICoreValueGuard.ParameterRange));
-
-                if (isCoreContract[targets[i]] && rangeData.range.length > 0) {
-                    _type = ProposalType.EcosystemParameterChange;
-
-                    if (!ICoreValueGuard(targets[i]).isWithinAllowedRange(setFuncSelector, newVal))
-                    {
-                        revert NewValueOutOfRange(newVal);
-                    }
-                } else {
-                    return ProposalType.ContractUpgrade;
-                }
-            } else {
-                // If the call fails, treat it as a ContractUpgrade proposal
+            if (operationType == ProposalType.ContractUpgrade) {
                 return ProposalType.ContractUpgrade;
             }
+
+            if (operationType == ProposalType.EcosystemParameterChange) {
+                hasParameterChange = true;
+            } else {
+                hasFundsTransfer = true;
+            }
         }
+
+        if (hasParameterChange && hasFundsTransfer) {
+            return ProposalType.OpenHighMajority;
+        }
+
+        if (hasParameterChange) {
+            return ProposalType.EcosystemParameterChange;
+        }
+
+        return ProposalType.OpenLowMajority;
+    }
+
+    /// @dev Returns the type of a single proposal operation.
+    /// @param target The operation target address.
+    /// @param value The operation value.
+    /// @param data The operation calldata.
+    /// @return The type of operation, value from ProposalType enum.
+    function _classifyOperation(
+        address target,
+        uint256 value,
+        bytes memory data
+    ) private view returns (ProposalType) {
+        if (target == address(0)) {
+            revert InvalidArgument();
+        }
+
+        // Both ContractUpgrade and EcosystemParameterChange require a calldata.
+        if (data.length == 0) {
+            return ProposalType.OpenLowMajority;
+        }
+
+        // 4-byte selector + uint256 argument
+        if (!isCoreContract[target] || value != 0 || data.length != 36) {
+            return ProposalType.ContractUpgrade;
+        }
+
+        (bytes4 setterSelector, uint256 newVal) = _extractCallData(data);
+
+        // Perform the low-level call to check if the allowed ranges are defined on the target contract's method.
+        // This is done to avoid calling isWithinAllowedRange, which will revert if ranges are not defined.
+        (bool success, bytes memory result) = target.staticcall(
+            abi.encodeCall(ICoreValueGuard.getAllowedParamsRangeWithSelector, (setterSelector))
+        );
+
+        if (!success || result.length == 0) {
+            return ProposalType.ContractUpgrade;
+        }
+
+        ICoreValueGuard.ParameterRange memory rangeData =
+            abi.decode(result, (ICoreValueGuard.ParameterRange));
+
+        if (rangeData.range.length == 0) {
+            return ProposalType.ContractUpgrade;
+        }
+
+        if (!ICoreValueGuard(target).isWithinAllowedRange(setterSelector, newVal)) {
+            revert NewValueOutOfRange(newVal);
+        }
+
+        return ProposalType.EcosystemParameterChange;
     }
 }
