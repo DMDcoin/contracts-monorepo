@@ -8,8 +8,7 @@ import {ICertifier} from "./interfaces/ICertifier.sol";
 import {IValidatorSetHbbft} from "./interfaces/IValidatorSetHbbft.sol";
 import {ZeroAddress} from "./lib/Errors.sol";
 
-/// @dev Allows validators to use a zero gas price for their service transactions
-/// (see https://wiki.parity.io/Permissioning.html#gas-price for more info).
+/// @dev Identifies certified accounts and registered mining addresses for zero-gas-price transactions.
 contract CertifierHbbft is Initializable, OwnableUpgradeable, ICertifier {
     // =============================================== Storage ========================================================
 
@@ -42,8 +41,7 @@ contract CertifierHbbft is Initializable, OwnableUpgradeable, ICertifier {
 
     // =============================================== Setters =======================================================
 
-    /// @dev Initializes the contract at network startup.
-    /// Can only be called by the constructor of the `InitializerHbbft` contract or owner.
+    /// @dev Initializes the certifier once during proxy deployment.
     /// @param _certifiedAddresses The addresses for which a zero gas price must be allowed.
     /// @param _validatorSet The address of the `ValidatorSetHbbft` contract.
     function initialize(
@@ -86,10 +84,7 @@ contract CertifierHbbft is Initializable, OwnableUpgradeable, ICertifier {
 
     // =============================================== Getters ========================================================
 
-    /// @dev Returns a boolean flag indicating whether the specified address is allowed to use zero gas price
-    /// transactions. Returns `true` if either the address is certified using the `_certify` function or if
-    /// `ValidatorSet.isReportValidatorValid` returns `true` for the specified address,
-    /// or the address is a pending validator who has to write it's key shares (ACK and PART).
+    /// @dev Returns true if the address is explicitly certified or has a registered staking address.
     /// @param _who The address for which the boolean flag must be determined.
     function certified(address _who) external view returns (bool) {
         if (_certified[_who]) {
@@ -100,10 +95,7 @@ contract CertifierHbbft is Initializable, OwnableUpgradeable, ICertifier {
         return stakingAddress != address(0);
     }
 
-    /// @dev Returns a boolean flag indicating whether the specified address is allowed to use zero gas price
-    /// transactions. Returns `true` if the address is certified using the `_certify` function.
-    /// This function differs from the `certified`: it doesn't take into account the returned value of
-    /// `ValidatorSetHbbft.isReportValidatorValid` function.
+    /// @dev Returns true if the address has been explicitly certified.
     /// @param _who The address for which the boolean flag must be determined.
     function certifiedExplicitly(address _who) external view returns (bool) {
         return _certified[_who];

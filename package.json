@@ -12,6 +12,7 @@
         "test:core": "pnpm --dir core run test",
         "test:dao": "pnpm --dir dao run test",
         "test:views": "pnpm --dir views run test",
+        "docs-build": "pnpm --dir core run docs-build && pnpm --dir dao run docs-build && pnpm --dir views run docs-build",
         "coverage": "pnpm run coverage:core && pnpm run coverage:dao && pnpm run coverage:views",
         "coverage:core": "pnpm --dir core run coverage",
         "coverage:dao": "pnpm --dir dao run coverage",

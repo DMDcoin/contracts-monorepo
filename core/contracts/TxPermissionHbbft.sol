@@ -250,15 +250,14 @@ contract TxPermissionHbbft is Initializable, OwnableUpgradeable, ITxPermission, 
     }
 
     /// @dev Returns the list of addresses allowed to initiate transactions of any type.
-    /// For these addresses the `allowedTxTypes` getter always returns the `ALL` bit mask
-    /// (see https://wiki.parity.io/Permissioning.html#how-it-works-1).
+    /// For these addresses the `allowedTxTypes` getter always returns the `ALL` bit mask.
     function allowedSenders() external view returns (address[] memory) {
         return _allowedSenders;
     }
 
     /// @dev Defines the allowed transaction types which may be initiated by the specified sender with
     /// the specified gas price and data. Used by node's engine each time a transaction is about to be
-    /// included into a block. See https://wiki.parity.io/Permissioning.html#how-it-works-1
+    /// included in a block.
     /// @param _sender Transaction sender address.
     /// @param _to Transaction recipient address. If creating a contract, the `_to` address is zero.
     /// @param _gasPrice Gas price in wei for the transaction.

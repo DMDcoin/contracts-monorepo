@@ -35,7 +35,7 @@ contract KeyGenHistory is Initializable, OwnableUpgradeable, IKeyGenHistory {
     /// in the real world, there are failures,
     /// this mechanics helps covering that,
     /// by revoking transactions, that were targeted for an earlier key gen round.
-    /// more infos: https://github.com/DMDcoin/hbbft-posdao-contracts/issues/106
+    /// more infos: https://github.com/DMDcoin/contracts-monorepo/issues/106
     uint256 public currentKeyGenRound;
 
     error AcksAlreadySubmitted();
@@ -55,8 +55,7 @@ contract KeyGenHistory is Initializable, OwnableUpgradeable, IKeyGenHistory {
         _;
     }
 
-    /// @dev ensures that Key Generation functions are called with wrong _epoch
-    /// parameter to prevent old and wrong transactions get picked up.
+    /// @dev Requires key-generation submissions to target the upcoming staking epoch.
     modifier onlyUpcomingEpoch(uint256 _epoch) {
         if (IStakingHbbft(validatorSetContract.getStakingContract()).stakingEpoch() + 1 != _epoch) {
             revert IncorrectEpoch();
@@ -64,8 +63,7 @@ contract KeyGenHistory is Initializable, OwnableUpgradeable, IKeyGenHistory {
         _;
     }
 
-    /// @dev ensures that Key Generation functions are called with wrong _epoch
-    /// parameter to prevent old and wrong transactions get picked up.
+    /// @dev Requires key-generation submissions to match the current round.
     modifier onlyCorrectRound(uint256 _roundCounter) {
         if (currentKeyGenRound != _roundCounter) {
             revert IncorrectRound(currentKeyGenRound, _roundCounter);

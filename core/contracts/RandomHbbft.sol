@@ -11,7 +11,7 @@ import {IValidatorSetHbbft} from "./interfaces/IValidatorSetHbbft.sol";
 import {SYSTEM_ADDRESS} from "./lib/Constants.sol";
 import {Unauthorized, ZeroAddress} from "./lib/Errors.sol";
 
-/// @dev Stores and uppdates a random seed that is used to form a new validator set by the
+/// @dev Stores and updates a random seed that is used to form a new validator set by the
 /// `ValidatorSetHbbft.newValidatorSet` function.
 contract RandomHbbft is Initializable, OwnableUpgradeable, IRandomHbbft {
     using BitMaps for BitMaps.BitMap;
@@ -43,7 +43,7 @@ contract RandomHbbft is Initializable, OwnableUpgradeable, IRandomHbbft {
 
     // ============================================== Modifiers =======================================================
 
-    /// @dev Ensures the caller is the SYSTEM_ADDRESS. See https://wiki.parity.io/Validator-Set.html
+    /// @dev Restricts calls to the engine's system address.
     modifier onlySystem() virtual {
         if (msg.sender != SYSTEM_ADDRESS) {
             revert Unauthorized();

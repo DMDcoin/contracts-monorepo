@@ -15,7 +15,7 @@ import {Unauthorized, ValidatorsListEmpty, ZeroAddress} from "./lib/Errors.sol";
 import {ValueGuards} from "./lib/ValueGuards.sol";
 import {TransferUtils} from "./utils/TransferUtils.sol";
 
-/// @dev Generates and distributes rewards according to the logic and formulas described in the POSDAO white paper.
+/// @dev Distributes staking and governance rewards and coordinates staking epoch transitions.
 contract BlockRewardHbbft is
     Initializable,
     OwnableUpgradeable,
@@ -92,7 +92,7 @@ contract BlockRewardHbbft is
 
     // ============================================== Modifiers =======================================================
 
-    /// @dev Ensures the caller is the SYSTEM_ADDRESS. See https://wiki.parity.io/Block-Reward-Contract.html
+    /// @dev Restricts calls to the engine's system address.
     modifier onlySystem() virtual {
         if (msg.sender != SYSTEM_ADDRESS) {
             revert Unauthorized();
@@ -118,11 +118,10 @@ contract BlockRewardHbbft is
 
     /// @dev Receive function.
     // The receive function is empty, to allow maximum compatibility for stocking the reinsert pot.
-    // see also: https://github.com/DMDcoin/diamond-contracts-core/issues/301
+    // see also: https://github.com/DMDcoin/contracts-monorepo/issues/301
     receive() external payable {}
 
-    /// @dev Initializes the contract at network startup.
-    /// Can only be called by the constructor of the `InitializerHbbft` contract or owner.
+    /// @dev Initializes the reward contract once during proxy deployment.
     /// @param _contractOwner The address of the contract owner
     /// @param _validatorSet The address of the `ValidatorSetHbbft` contract.
     function initialize(
@@ -171,20 +170,17 @@ contract BlockRewardHbbft is
         deltaPot += msg.value;
     }
 
-    /// @dev Notify block reward contract, that current epoch must be closed earlier.
+    /// @dev Requests an early end to the current staking epoch.
     ///
-    /// https://github.com/DMDcoin/diamond-contracts-core/issues/92
+    /// https://github.com/DMDcoin/contracts-monorepo/issues/92
     function notifyEarlyEpochEnd() external onlyConnectivityTracker {
         earlyEpochEnd = true;
 
         emit EarlyEpochEndNotificationReceived();
     }
 
-    /// @dev Called by the engine when producing and closing a block,
-    /// see https://wiki.parity.io/Block-Reward-Contract.html.
-    /// This function performs all of the automatic operations needed for accumulating block producing statistics,
-    /// starting a new staking epoch, snapshotting staking amounts for the upcoming staking epoch,
-    /// and rewards distributing at the end of a staking epoch.
+    /// @dev Called by the engine when closing a block. At epoch end it distributes rewards,
+    /// snapshots stakes for the next epoch, and finalizes the validator set change.
     /// @param _isEpochEndBlock Indicates if this is the last block of the current epoch i.e.
     /// just before the pending validators are finalized.
     function reward(bool _isEpochEndBlock)
@@ -400,7 +396,7 @@ contract BlockRewardHbbft is
         bool isPhaseTransition = block.timestamp >= phaseTransitionTime;
 
         // TODO: Problem occurs here if there are not regular blocks:
-        // https://github.com/DMDcoin/hbbft-posdao-contracts/issues/96
+        // https://github.com/DMDcoin/contracts-monorepo/issues/96
 
         // we are in a transition to phase 2 if the time for it arrived,
         // and we do not have pendingValidators yet.
@@ -445,7 +441,7 @@ contract BlockRewardHbbft is
 
         // on closing a block, the governance pot is able to execute functions.
         // those calls are able to fail.
-        // more details: https://github.com/DMDcoin/diamond-contracts-core/issues/231
+        // more details: https://github.com/DMDcoin/contracts-monorepo/issues/231
         IGovernancePot governancePot = IGovernancePot(governancePotAddress);
 
         // solhint-disable no-empty-blocks

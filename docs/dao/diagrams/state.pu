@@ -1,0 +1,46 @@
+@startuml ProposalState
+
+title Proposal state transition diagram
+
+hide empty description
+
+state "Proposal Phase" as ProposalPhase {
+    [*] --> Created : propose()
+
+    Created -> Canceled : cancel(id, reason)
+    Canceled -> [*]
+}
+
+note left of ProposalPhase
+    **7 days**
+    New proposals can be created
+    or canceled.
+end note
+
+state "Voting Phase" as VotingPhase {
+    Created --> Active : switchPhase()
+
+    Active --> Active : collecting votes
+}
+
+note left of VotingPhase
+    **7 days**
+    Voting on existing proposals.
+    New proposals cannot be created.
+end note
+
+Active --> VotingFinished : switchPhase()
+
+state ProposalFinalized <<choice>>
+
+VotingFinished --> ProposalFinalized : finalize(id)
+
+ProposalFinalized -> Declined : [Quorum not met]
+Declined -> [*]
+
+ProposalFinalized --> Accepted : [Quorum met]
+Accepted -> Executed : execute(id)\nwithin the execution window
+Executed -> [*]
+
+
+@enduml
