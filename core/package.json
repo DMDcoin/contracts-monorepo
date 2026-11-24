@@ -8,7 +8,7 @@
         "test": "pnpm run clean && pnpm hardhat test",
         "coverage": "pnpm run clean && pnpm hardhat test --coverage",
         "clean": "pnpm hardhat clean",
-        "docs-build": "forge doc",
+        "docs-build": "node ../scripts/build-docs.mjs core",
         "lint": "pnpm run solhint:ci",
         "solhint": "./node_modules/.bin/solhint -f table --ignore-path ../.solhintignore 'contracts/**/*.sol'",
         "solhint:ci": "./node_modules/.bin/solhint --disc --max-warnings 0 -f compact --ignore-path ../.solhintignore 'contracts/**/*.sol'",
@@ -27,7 +27,7 @@
     "bugs": {
         "url": "https://github.com/DMDcoin/contracts-monorepo/issues"
     },
-    "homepage": "https://github.com/DMDcoin/contracts-monorepo/core#readme",
+    "homepage": "https://github.com/DMDcoin/contracts-monorepo/blob/master/docs/core/src/README.md",
     "dependencies": {
         "@openzeppelin/contracts": "5.0.2",
         "@openzeppelin/contracts-upgradeable": "5.0.2"

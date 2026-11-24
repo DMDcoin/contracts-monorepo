@@ -17,6 +17,7 @@
 
 # foundry specific files
 **/out/
+/docs/generated/
 
 # static analysis reports
 **/solhint_report.sarif
