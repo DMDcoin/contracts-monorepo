@@ -353,8 +353,7 @@ contract StakingHbbft is
         revert NotPayable();
     }
 
-    /// @dev Initializes the network parameters.
-    /// Can only be called by the constructor of the `InitializerHbbft` contract or owner.
+    /// @dev Initializes the staking parameters once during proxy deployment.
     /// @param _contractOwner The address of the contract owner
     /// @param stakingParams stores other parameters due to stack too deep issue
     ///  _validatorSetContract The address of the `ValidatorSetHbbft` contract.
@@ -529,7 +528,7 @@ contract StakingHbbft is
     /// validators got chosen outside the transition timewindow
     /// and get banned immediatly, since they never got their chance
     /// to write their keys.
-    /// more about: https://github.com/DMDcoin/hbbft-posdao-contracts/issues/96
+    /// more about: https://github.com/DMDcoin/contracts-monorepo/issues/96
     function notifyNetworkOfftimeDetected(uint256 detectedOfflineTime)
         public
         onlyValidatorSetContract
