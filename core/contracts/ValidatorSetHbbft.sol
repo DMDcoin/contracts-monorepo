@@ -130,10 +130,9 @@ contract ValidatorSetHbbft is Initializable, OwnableUpgradeable, IValidatorSetHb
 
     // =============================================== Setters ========================================================
 
-    /// @dev Initializes the network parameters. Used by the
-    /// constructor of the `InitializerHbbft` contract.
+    /// @dev Initializes the validator set once during proxy deployment.
     /// @param _contractOwner The address of the contract owner.
-    /// @param _params ValidatorSetHbbft contract parameeters (introduced to avoid stack too deep issue):
+    /// @param _params ValidatorSetHbbft contract parameters (introduced to avoid stack too deep issue):
     ///  blockRewardContract The address of the `BlockRewardHbbft` contract.
     ///  randomContract The address of the `RandomHbbft` contract.
     ///  stakingContract The address of the `StakingHbbft` contract.
@@ -571,7 +570,7 @@ contract ValidatorSetHbbft is Initializable, OwnableUpgradeable, IValidatorSetHb
     /// @dev in Hbbft there are sweet spots for the choice of validator counts
     /// those are FLOOR((n - 1)/3) * 3 + 1
     /// values: 1 - 4 - 7 - 10 - 13 - 16 - 19 - 22 - 25
-    /// more about: https://github.com/DMDcoin/hbbft-posdao-contracts/issues/84
+    /// more about: https://github.com/DMDcoin/contracts-monorepo/issues/84
     /// @return a sweet spot n for a given number n
     function getValidatorCountSweetSpot(uint256 _possibleValidatorCount)
         public
@@ -665,7 +664,7 @@ contract ValidatorSetHbbft is Initializable, OwnableUpgradeable, IValidatorSetHb
         // and the repair takes longer than a single epoch.
         // we detect this case here and grant an extra time window
         // so the selected nodes also get their chance to write their keys.
-        // more about: https://github.com/DMDcoin/hbbft-posdao-contracts/issues/96
+        // more about: https://github.com/DMDcoin/contracts-monorepo/issues/96
 
         // timescale:
         // epoch start time ..... phase 2 transition .... current end of phase 2 ..... now ..... new end of phase 2.

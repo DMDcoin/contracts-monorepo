@@ -1,98 +1,64 @@
-# HBBFT - POSDAO Smart Contracts
+# DMD Diamond Smart Contracts
 
 [![CI][ci-badge]][ci] [![Static analysis][static-analysis-badge]][static-analysis] [![Coverage][coveralls-badge]][coveralls]
 
-Implementation of the HBBFT-POSDAO consensus algorithm in [Solidity](https://solidity.readthedocs.io),
-suited for the needs of the DMD Diamond Blockchain https://github.com/DMDcoin/whitepaper/wiki
+This repository contains the [Solidity](https://docs.soliditylang.org/en/v0.8.25/) contracts for the DMD Diamond blockchain. The contracts implement proof-of-stake validator selection, staking rewards, and on-chain governance. The node runs Honey Badger BFT (HBBFT) consensus with the selected validators. See the [DMD Diamond white paper](https://github.com/DMDcoin/whitepaper/wiki) for the protocol design.
 
-## About
+## Packages
 
-POSDAO is a Proof-of-Stake (POS) algorithm implemented as a decentralized autonomous organization (DAO). It is designed to provide a decentralized, fair, and energy efficient consensus for public chains. The algorithm works as a set of smart contracts written in Solidity. It is designed to work together with a Honeybadger BFT (HBBFT) consensus algoritm, which is leaderless and with instant finality. It incentivizes actors to behave in the best interests of a network.
-
-The algorithm provides a Sybil control mechanism for reporting malicious validators and adjusting their stake, distributing a block reward, and managing a set of validators.
-
-## POSDAO Repositories and Resources
-
-- White paper https://github.com/DMDcoin/whitepaper/wiki
-
-## Smart Contract Summaries
-
-_Note: The following descriptions are for HBBFT contracts only. There is also an AuRa implementation that can be found [here](https://github.com/poanetwork/posdao-contracts). All contracts are located in the `contracts` directory._
-
-- `BlockRewardHbbft`: generates and distributes rewards according to the logic and formulas described in the white paper. Main features include:
-    - mints native coins;
-    - makes a snapshot of the validators stakes at the beginning of each staking epoch. That snapshot is used by the `StakingHbbft.claimReward` function to transfer rewards to validators and their delegators.
-      Check also the [BlockRewardHbbft call graph](/docs/BlockRewardHbbft-call-graph.png).
-
-- `Certifier`: allows validators to use a zero gas price for their service transactions (see [Parity Wiki](https://wiki.parity.io/Permissioning.html#gas-price) for more info). The following functions are considered service transactions:
-    - ValidatorSetHbbft.reportMalicious
-    - KeyGenHistory.writeAck
-    - KeyGenHistory.writePart
-
-- `RandomHbbft`: stores random numbers written by the HBBFT engine. Random numbers are used to form a new validator set at the beginning of each staking epoch by the `ValidatorSet` contract. There are two key functions:
-    - `setCurrentSeed`. This is a setter that can only be called by the HBBFT engine in order to set the newly generated random number that is gonna be used for the new validator set selection.
-    - `currentSeed`. This public getter is used by the `ValidatorSetHbbft` contract at a predefined block of each staking epoch to get the accumulated random seed for randomly choosing new validators among active pools. It can also be used by anyone who wants to use the network's random seed.
-
-- `StakingHbbft`: contains staking logic including:
-    - creating, storing, and removing pools by candidates and validators;
-    - staking coins by participants (delegators, candidates, or validators) into the pools;
-    - storing participants’ stakes;
-    - withdrawing coins and rewards by participants from the pools;
-    - moving coins between pools by participant.
-      Check also the [StakingHbbft call graph](/docs/StakingHbbft-call-graph.png).
-
-- `TxPermission`: controls the use of zero gas price by validators in service transactions, protecting the network against "transaction spamming" by malicious validators. The protection logic is declared in the `allowedTxTypes` function.
-
-- `ValidatorSetHbbft`: stores the current validator set and contains the logic for choosing new validators at the beginning of each staking epoch. The logic uses a random seed stored in the `RandomHbbft` contract. Also, ValidatorSetHbbft is responsible for discovering and removing malicious validators. This contract is based on `reporting ValidatorSet` [described in Parity Wiki](https://wiki.parity.io/Validator-Set.html#reporting-contract).
-  Check also the [ValidatorSetHbbft call graph](/docs/ValidatorSetHbbft-call-graph.png).
-
-- `BonusScoreSystem`: Handles the Bonus Scores that validators collect during their supportive phases.
-
-- `ConnectivityTrackerHbbft`: Tracks the notifications of individual nodes in order to handle Early Epoch Ends if the network has to many nodes that became disconnected.
-
-- `KeyGenHistory`: Manages the treshhold encryption shared key generation, required for epoch switches in order to pass the leadership to a new set of validators.
-
-- `ValueGuards`: Manages valid ranges for changes of Ecosystem Parameter changes.
+- [Core contracts](core/contracts) for validator selection, staking, epoch rewards, key generation, and transaction permissions. See the [core contract reference](docs/core/src/README.md).
+- [DAO contracts](docs/dao/README.md) for proposing, voting on, and executing governance decisions.
+- [View contracts](docs/views/README.md) for reading staking, validator, and governance data in batches.
 
 ## Usage
 
-### Install Dependencies
+### Install dependencies
+
+Use the Node.js version in [.nvmrc](.nvmrc), [pnpm](https://pnpm.io/installation), and [Foundry](https://www.getfoundry.sh/). From the repository root, initialize the Foundry dependency and install the workspace dependencies.
 
 ```bash
-$ pnpm install
+git submodule update --init --recursive
+pnpm install --frozen-lockfile
 ```
 
-### Testing
-
-To run unit tests:
+### Build and test
 
 ```bash
-$ pnpm run test
+pnpm run build
+pnpm run test
 ```
 
-### Flatten
+To run tests for one package, use `pnpm run test:core`, `pnpm run test:dao`, or `pnpm run test:views`.
 
-Flattened contracts can be used to verify the contract code in a block explorer like BlockScout or Etherscan. See https://docs.blockscout.com/for-users/smart-contract-interaction/verifying-a-smart-contract for Blockscout verification instructions.
+### Generate a network spec
 
-To prepare flattened version of the contracts:
+Prepare a YAML file from [the example genesis configuration](templates/init-data.example.yaml). Use the initial validators' addresses, public keys, and HBBFT key-generation parts and acknowledgments in the same order across the validator lists.
 
 ```bash
-$ pnpm --dir core run flat
+pnpm run spec -- --init-data path/to/init-data.yaml
 ```
 
-Once flattened, the contracts are available in the `core/flat` directory.
+This builds the three packages and writes `spec_hbbft.json` and the `blockscout_verify.sh` verification helper in the repository root.
+
+### Flatten the core contracts
+
+```bash
+pnpm --dir core run flat
+```
+
+The flattened Solidity files are written to `core/flat`. See the [Blockscout verification guide](https://docs.blockscout.com/devs/verification) for verification options.
+
+### Build the documentation
+
+See the [documentation index](docs/README.md#build-the-documentation) for the package guides and build commands.
 
 ## Contributing
 
-See the [CONTRIBUTING](CONTRIBUTING.md) document for contribution, testing and pull request protocol.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution process and [the code of conduct](CODE_OF_CONDUCT.md) for community standards.
 
 ## License
 
-Licensed under:
-
-- Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
-- GNU GPL v3.0 License or later ([LICENSE-GPL](LICENSE-GPL) or <https://www.gnu.org/licenses/gpl-3.0.en.html#license-text>)
-
+The core package uses the [Apache License 2.0](LICENSE-APACHE). The DAO and views packages use the [GNU GPL 3.0 or later](LICENSE-GPL). See [COPYRIGHT](COPYRIGHT) for the inherited POSDAO notice.
 
 [ci]: https://github.com/DMDcoin/contracts-monorepo/actions/workflows/ci.yml
 [ci-badge]: https://github.com/DMDcoin/contracts-monorepo/actions/workflows/ci.yml/badge.svg?branch=master

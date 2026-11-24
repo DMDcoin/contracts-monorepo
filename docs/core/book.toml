@@ -1,0 +1,19 @@
+[book]
+src = "src"
+title = "DMD Diamond Core Contracts"
+
+# Keep README chapter paths consistent with relative Markdown links.
+[build]
+use-default-preprocessors = false
+
+[preprocessor.links]
+
+[output.html]
+no-section-label = true
+additional-js = ["solidity.min.js"]
+additional-css = ["book.css"]
+mathjax-support = true
+git-repository-url = "https://github.com/DMDcoin/contracts-monorepo"
+
+[output.html.fold]
+enable = true
